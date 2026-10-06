@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "version": "1.0.0",
+  "categories": ["top", "bottom", "onepiece", "outerwear", "shoes", "accessory"],
+  "subcategories": {
+    "top": ["T-shirt", "Shirt", "Blouse", "Knit", "Hoodie", "Tank", "Polo"],
+    "bottom": ["Jeans", "Trousers", "Shorts", "Skirt", "Leggings"],
+    "onepiece": ["Dress", "Jumpsuit", "Suit"],
+    "outerwear": ["Jacket", "Coat", "Cardigan", "Blazer", "Overshirt"],
+    "shoes": ["Sneakers", "Boots", "Loafers", "Heels", "Sandals", "Flats"],
+    "accessory": ["Bag", "Belt", "Hat", "Scarf", "Jewelry"]
+  },
+  "styles": ["casual", "minimal", "streetwear", "smart casual", "formal", "athleisure", "vintage", "bohemian", "preppy", "workwear"],
+  "patterns": ["solid", "striped", "checked", "floral", "graphic", "other"],
+  "textures": ["smooth", "denim", "knit", "ribbed", "linen-like", "leather-like", "suede-like", "fleece", "other", "unknown"],
+  "fits": ["regular", "relaxed", "oversized", "slim", "fitted", "unknown"],
+  "weights": {
+    "timeless": [0.85, 0.15, 0.0],
+    "balanced": [0.75, 0.15, 0.10],
+    "trend": [0.60, 0.15, 0.25]
+  },
+  "principles": {
+    "color": "Neutrals, analogous hues and intentional contrast can coordinate; color relationships are preferences, not bans.",
+    "pattern": "A quiet base helps a strong pattern stand out. Multiple patterns can work with a shared palette.",
+    "texture": "Mixing smooth and textured surfaces adds depth. Fabric weight and season should feel coherent.",
+    "proportion": "Consider the balance between fitted and relaxed pieces and the intended silhouette.",
+    "occasion": "Match formality, layering and practical weather needs to the occasion."
+  },
+  "templates": [["top", "bottom", "shoes"], ["onepiece", "shoes"]],
+  "beamWidth": 64,
+  "slotLimit": 24
+}

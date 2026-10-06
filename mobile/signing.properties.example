@@ -1,0 +1,5 @@
+# Example only. Fill mobile/signing.properties locally; never commit real secrets.
+storeFile=signing/release.p12
+storePassword=<your-local-password>
+keyAlias=wardrobe
+keyPassword=<your-local-password>
