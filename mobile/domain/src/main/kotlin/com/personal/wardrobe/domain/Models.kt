@@ -6,7 +6,7 @@ data class Garment(
     val fit:String="regular", val warmth:Int=1, val formality:Int=1, val styleTags:List<String> = listOf("casual"), val season:String="all",
     val status:String="available", val imageIds:List<String> = emptyList(), val cutoutId:String="", val brand:String="", val brandConfirmed:Boolean=false,
     val productUrl:String="", val composition:String="", val compositionVerified:Boolean=false, val manualFields:List<String> = emptyList(),
-    val provenance:Map<String,Any> = emptyMap(), val revision:Int=1, val updatedAt:String="", val deleted:Boolean=false
+    val provenance:Map<String,Any> = emptyMap(), val revision:Int=1, val updatedAt:String="", val deleted:Boolean=false, val shape:String=""
 )
 data class Profile(val id:String="profile", val styles:List<String> = listOf("casual"), val favoriteColors:List<String> = emptyList(),val fit:String="regular",val sizes:String="",val dislikedCombinations:String="",val likedItems:List<String> = emptyList(),val dislikedItems:List<String> = emptyList(),val region:String="",val currency:String="USD",val shoppingBudget:Double=0.0,val stores:List<String> = emptyList(),val referenceImageId:String="",val revision:Int=1)
 data class Trend(val id:String="",val title:String="",val tags:List<String> = emptyList(),val sources:List<String> = emptyList(),val confidence:Double=0.0,val season:String="all",val observedAt:String="",val expiresAt:String="")

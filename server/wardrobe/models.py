@@ -14,6 +14,7 @@ class Garment(BaseModel):
     pattern: str = Field(default="solid", max_length=80)
     texture: str = Field(default="unknown", max_length=80)
     fit: str = Field(default="regular", max_length=80)
+    shape: str = Field(default="", max_length=80)
     warmth: int = Field(default=1, ge=0, le=3)
     formality: int = Field(default=1, ge=0, le=3)
     styleTags: list[str] = Field(default_factory=lambda:["casual"], max_length=20)
@@ -106,7 +107,7 @@ class ProviderConfig(BaseModel):
     backgroundAnalysis: bool = False
 
 class JobRequest(BaseModel):
-    kind: Literal["analysis", "style", "preview", "preview_probe", "search", "cutout", "trend_analysis"]
+    kind: Literal["analysis", "style", "preview", "preview_probe", "search", "cutout", "detect", "trend_analysis"]
     provider: Literal["gemini", "openai", "codex", "claude", "local"]
     garmentId: str = Field(default="",max_length=80)
     revision: int = Field(default=0,ge=0)

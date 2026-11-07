@@ -16,8 +16,10 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
+from .detect import detect_clothing
 from .engine import RULES_PATH, generate, gaps
-from .images import cutout, image_path, import_remote_image, save_image
+from .images import MODEL_PATH, crop_suggestion, cutout, image_path, import_remote_image, save_image
 from .models import JobRequest, PairRequest, ProviderConfig, SyncRequest
 from .providers import Providers
 from .security import digest, pairing_url
@@ -52,36 +54,38 @@ class Worker:
                 continue
             rows=self.store.query("SELECT * FROM jobs WHERE id=?",(id_,))
             if not rows or rows[0]["status"]!="queued": continue
-            job=rows[0];request=JobRequest.model_validate_json(job["request"])
+            job=rows[0]
             self.store.execute("UPDATE jobs SET status='running',updatedAt=? WHERE id=?",(timestamp(),id_))
             def cancelled():
                 return self.stop.is_set() or self.store.query("SELECT status FROM jobs WHERE id=?",(id_,))[0]["status"]=="cancelled"
             try:
-                if request.kind=="cutout":
+                # A malformed stored request must fail one job, never kill the worker thread.
+                request=JobRequest.model_validate_json(job["request"])
+                if request.kind in ("cutout","detect"):
                     if not request.imageIds: raise ValueError("Choose an image first")
                     if request.garmentId:
                         garment=next((g for g in self.store.records("garment") if g["id"]==request.garmentId),None)
-                        if not garment or garment["revision"]!=request.revision or request.imageIds[0] not in garment.get("imageIds",[]): raise ValueError("This item or its photo changed; request a fresh cutout")
-                    result=cutout(self.store,request.imageIds[0])
+                        if not garment or garment["revision"]!=request.revision or request.imageIds[0] not in garment.get("imageIds",[]): raise ValueError("This item or its photo changed; request fresh detection")
+                    result=(cutout if request.kind=="cutout" else detect_clothing)(self.store,request.imageIds[0])
                     result.update(garmentId=request.garmentId,revision=request.revision)
                 else: result=self.providers.run(request,id_,cancelled)
                 if not cancelled(): self.store.execute("UPDATE jobs SET status='completed',result=?,updatedAt=? WHERE id=?",(canonical(result),timestamp(),id_))
             except Exception as error:
                 if not cancelled(): self.store.execute("UPDATE jobs SET status='failed',error=?,updatedAt=? WHERE id=?",(str(error)[:400],timestamp(),id_))
 
-    def enqueue(self,request):
+    def enqueue(self,request,device_id=""):
         # Duplicate submissions can overlap when a phone retries after a lost response.
         with self.store.lock:
-            return self._enqueue_locked(request)
+            return self._enqueue_locked(request,device_id)
 
-    def _enqueue_locked(self,request):
-        existing=self.store.query("SELECT id,request FROM jobs WHERE requestId=?",(request.requestId,))
+    def _enqueue_locked(self,request,device_id=""):
+        existing=self.store.query("SELECT id,request FROM jobs WHERE requestId=? AND deviceId=?",(request.requestId,device_id))
         if existing:
             if existing[0]["request"]!=canonical(request.model_dump()): raise ValueError("A request retry changed its payload")
             return existing[0]["id"]
         if self.pending.qsize()>=25: raise ValueError("Job queue is full; try again later")
         id_=str(uuid.uuid4())
-        self.store.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)",(id_,request.requestId,request.kind,request.provider,"queued",canonical(request.model_dump()),"","",timestamp(),timestamp()))
+        self.store.execute("INSERT INTO jobs(id,requestId,kind,provider,status,request,result,error,createdAt,updatedAt,deviceId) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(id_,request.requestId,request.kind,request.provider,"queued",canonical(request.model_dump()),"","",timestamp(),timestamp(),device_id))
         self.pending.put(id_)
         return id_
 
@@ -105,6 +109,12 @@ def create_app(root: Path | None=None,background=True):
     app.state.store=store;app.state.providers=providers;app.state.admin_token=admin_token;app.state.worker=worker
     limits={}
 
+    def limited(key,maximum,window=60):
+        count,start=limits.get(key,(0,time.monotonic()))
+        if time.monotonic()-start>window: count,start=0,time.monotonic()
+        limits[key]=(count+1,start)
+        return count<maximum
+
     @app.middleware("http")
     async def security_headers(request,call_next):
         maximum=100_000_000 if request.url.path=="/admin/restore" else 12_000_000
@@ -112,10 +122,7 @@ def create_app(root: Path | None=None,background=True):
             return JSONResponse({"detail":"Request is too large"},status_code=413)
         if request.url.path=="/v1/pair":
             address=request.client.host if request.client else "unknown"
-            count,start=limits.get(address,(0,time.monotonic()))
-            if time.monotonic()-start>60: count,start=0,time.monotonic()
-            limits[address]=(count+1,start)
-            if count>=10: return JSONResponse({"detail":"Too many pairing attempts; wait a minute"},status_code=429)
+            if not limited("pair:"+address,10): return JSONResponse({"detail":"Too many pairing attempts; wait a minute"},status_code=429)
         response=await call_next(request)
         response.headers["Cache-Control"]="no-store"
         response.headers["X-Content-Type-Options"]="nosniff"
@@ -126,16 +133,20 @@ def create_app(root: Path | None=None,background=True):
     def admin(x_wardrobe_admin:Annotated[str|None,Header()]=None):
         if not x_wardrobe_admin or not secrets.compare_digest(x_wardrobe_admin,admin_token): raise HTTPException(401,"Open the PC dashboard using Open Dashboard.cmd")
 
-    def device(authorization:Annotated[str|None,Header()]=None):
+    def device(request:Request,authorization:Annotated[str|None,Header()]=None):
         token=(authorization or "").removeprefix("Bearer ")
         rows=store.query("SELECT id FROM devices WHERE tokenHash=? AND revoked=0",(digest(token),))
         if not token or not rows: raise HTTPException(401,"Pair this phone again on your PC")
+        # Routes read this instead of taking a Depends() parameter: with postponed annotations,
+        # a dependency whose function is local to create_app cannot be resolved from a signature.
+        request.state.device_id=rows[0]["id"]
         return rows[0]["id"]
 
-    def job_record(id_):
-        rows=store.query("SELECT id,kind,provider,status,result,error,createdAt,updatedAt FROM jobs WHERE id=?",(id_,))
-        if not rows: raise HTTPException(404,"Job not found")
-        row=rows[0];row["result"]=json.loads(row["result"]) if row["result"] else None
+    def job_record(id_,device_id=None):
+        rows=store.query("SELECT id,kind,provider,status,result,error,createdAt,updatedAt,deviceId FROM jobs WHERE id=?",(id_,))
+        # A paired phone may only read and cancel requests it submitted itself.
+        if not rows or (device_id is not None and rows[0]["deviceId"]!=device_id): raise HTTPException(404,"Job not found")
+        row=rows[0];row.pop("deviceId",None);row["result"]=json.loads(row["result"]) if row["result"] else None
         return row
 
     @app.exception_handler(ValueError)
@@ -208,10 +219,32 @@ def create_app(root: Path | None=None,background=True):
 
     @app.get("/v1/capabilities",dependencies=[Depends(device)])
     def capabilities():
-        return {"providers":[providers.capabilities(p) for p in ("codex","claude","gemini","openai")],"cutout":(ROOT.parents[1]/"models"/"u2netp.onnx").exists()}
+        return {"providers":[providers.capabilities(p) for p in ("codex","claude","gemini","openai")],"cutout":MODEL_PATH.exists(),"detect":MODEL_PATH.exists()}
+
+    @app.get("/v1/providers",dependencies=[Depends(device)])
+    def provider_list(request:Request):
+        # Configurations and capability reasons only; secrets never leave the PC.
+        return {"providers":[providers.capabilities(p) for p in ("gemini","openai","codex","claude")],"configurable":["gemini","openai"],"detect":MODEL_PATH.exists()}
+
+    @app.put("/v1/providers/{id_}",dependencies=[Depends(device)])
+    def configure_from_phone(id_:str,config:ProviderConfig,request:Request):
+        if id_ not in ("gemini","openai"):
+            raise HTTPException(403,"Only Gemini and OpenAI keys can be added from the app; sign in to PC agents on the PC")
+        # Background analysis spends provider allowance unattended, so it stays a PC-dashboard decision;
+        # the phone neither enables nor silently disables it.
+        current,_=providers.config(id_)
+        providers.configure(id_,config.model_copy(update={"backgroundAnalysis":current.get("backgroundAnalysis",False)}))
+        return providers.capabilities(id_)
+
+    @app.post("/v1/providers/{id_}/test",dependencies=[Depends(device)])
+    def test_from_phone(id_:str,request:Request):
+        if id_ not in ("gemini","openai","codex","claude"): raise ValueError("Unsupported AI connection")
+        if not limited("provider-test:"+request.state.device_id,6): raise HTTPException(429,"Too many connection checks; wait a minute")
+        return providers.test(id_)
 
     @app.post("/v1/sync",dependencies=[Depends(device)])
-    def sync(request:SyncRequest):
+    def sync(request:SyncRequest,http:Request):
+        device_id=http.state.device_id
         for change in request.changes:
             if change.deleted: continue
             images=list(change.payload.get("imageIds",[]))
@@ -221,7 +254,7 @@ def create_app(root: Path | None=None,background=True):
                 if not image_path(store,id_).exists(): raise HTTPException(409,"Upload the referenced images before refreshing wardrobe records")
         result=store.sync(request)
         rules=RULES_PATH.read_text(encoding="utf-8")
-        result.update(rulesJson=rules,rulesHash=hashlib.sha256(rules.encode()).hexdigest(),trends=[json.loads(r["payload"]) for r in store.query("SELECT payload FROM trends")],feedItems=store.query("SELECT source,title,url,publishedAt FROM feed_items ORDER BY publishedAt DESC LIMIT 40"),serverTime=timestamp(),jobs=[job_record(r["id"]) for r in store.query("SELECT id FROM jobs ORDER BY createdAt DESC LIMIT 50")])
+        result.update(rulesJson=rules,rulesHash=hashlib.sha256(rules.encode()).hexdigest(),trends=[json.loads(r["payload"]) for r in store.query("SELECT payload FROM trends")],feedItems=store.query("SELECT source,title,url,publishedAt FROM feed_items ORDER BY publishedAt DESC LIMIT 40"),serverTime=timestamp(),jobs=[job_record(r["id"],device_id) for r in store.query("SELECT id FROM jobs WHERE deviceId=? ORDER BY createdAt DESC LIMIT 50",(device_id,))])
         return result
 
     @app.put("/v1/media/{id_}",dependencies=[Depends(device)])
@@ -238,6 +271,17 @@ def create_app(root: Path | None=None,background=True):
         if not path.is_file(): raise HTTPException(404,"Image not found")
         return FileResponse(path,media_type="application/octet-stream")
 
+    @app.post("/v1/photos/suggest-crop",dependencies=[Depends(device)])
+    async def suggest_crop(request:Request):
+        """Frame a new photo automatically; the photo is measured, not stored."""
+        if not limited("crop:"+request.state.device_id,20): raise HTTPException(429,"Too many automatic crops; wait a minute")
+        data=bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data)>8_000_000: raise HTTPException(413,"Image exceeds 8 MB")
+        # Masking is CPU work, so it must not block the event loop that serves the dashboard.
+        return await run_in_threadpool(crop_suggestion,bytes(data))
+
     @app.post("/v1/products/import",dependencies=[Depends(device)])
     def product(body:dict): return extract_product(str(body.get("url","")))
 
@@ -248,23 +292,28 @@ def create_app(root: Path | None=None,background=True):
     def recommendations(): return {"gaps":gaps(store.records("garment"))}
 
     @app.post("/v1/jobs",dependencies=[Depends(device)])
-    def submit(request:JobRequest):
+    def submit(request:JobRequest,http:Request):
+        device_id=http.state.device_id
         if not worker: raise ValueError("Worker is unavailable")
         if request.kind in ("trend_analysis","preview_probe"): raise HTTPException(403,"Use the PC dashboard for background analysis and capability probes")
-        if request.kind!="cutout":
+        if request.kind=="detect":
+            if request.provider!="local": raise ValueError("Local detection does not use an AI provider")
+            if not request.garmentId or not request.imageIds: raise ValueError("Choose a saved item photo to detect")
+        elif request.kind!="cutout":
             capability={"analysis":"vision","style":"text","preview":"imageGeneration","search":"webSearch"}[request.kind]
             if not providers.capabilities(request.provider).get(capability): raise HTTPException(403,"Feature locked; configure a supporting AI connection on your PC")
-        return job_record(worker.enqueue(request))
+        return job_record(worker.enqueue(request,device_id),device_id)
 
     @app.get("/v1/jobs/{id_}",dependencies=[Depends(device)])
-    def get_job(id_:str): return job_record(id_)
+    def get_job(id_:str,http:Request): return job_record(id_,http.state.device_id)
 
     @app.post("/v1/jobs/{id_}/cancel",dependencies=[Depends(device)])
-    def cancel_job(id_:str):
-        job=job_record(id_)
+    def cancel_job(id_:str,http:Request):
+        device_id=http.state.device_id
+        job=job_record(id_,device_id)
         if job["status"] in ("queued","running"):
             store.execute("UPDATE jobs SET status='cancelled',updatedAt=? WHERE id=?",(timestamp(),id_))
-        return job_record(id_)
+        return job_record(id_,device_id)
 
     @app.get("/admin/backup",dependencies=[Depends(admin)])
     def backup():

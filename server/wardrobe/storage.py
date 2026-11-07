@@ -30,11 +30,14 @@ class Store:
         CREATE TABLE IF NOT EXISTS records(kind TEXT,id TEXT,revision INTEGER,payload TEXT,deleted INTEGER,updatedAt TEXT,PRIMARY KEY(kind,id));
         CREATE TABLE IF NOT EXISTS changes(seq INTEGER PRIMARY KEY AUTOINCREMENT,changeId TEXT UNIQUE,fingerprint TEXT,kind TEXT,recordId TEXT);
         CREATE TABLE IF NOT EXISTS providers(id TEXT PRIMARY KEY,config TEXT NOT NULL,secret TEXT DEFAULT '');
-        CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,requestId TEXT UNIQUE,kind TEXT,provider TEXT,status TEXT,request TEXT,result TEXT,error TEXT,createdAt TEXT,updatedAt TEXT);
+        CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,requestId TEXT UNIQUE,kind TEXT,provider TEXT,status TEXT,request TEXT,result TEXT,error TEXT,createdAt TEXT,updatedAt TEXT,deviceId TEXT DEFAULT '');
         CREATE TABLE IF NOT EXISTS feed_items(id TEXT PRIMARY KEY,source TEXT,title TEXT,url TEXT,publishedAt TEXT,summary TEXT,collectedAt TEXT);
         CREATE TABLE IF NOT EXISTS trends(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS spend(id TEXT PRIMARY KEY,provider TEXT,month TEXT,amount REAL,status TEXT);
         """)
+        # Existing 1.0.x databases predate per-device job ownership.
+        if "deviceId" not in {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN deviceId TEXT DEFAULT ''")
         self.db.commit()
 
     def query(self,sql,args=()):

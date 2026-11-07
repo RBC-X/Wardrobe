@@ -2,15 +2,16 @@
 
 Current delivery: **1.0.1**, signed Android versionCode **2**. The release preserves the existing signing identity and database format.
 
-Wardrobe is a personal Android 10+ app with a Windows companion. Matching, manual editing, photo color extraction, preferences, and actual-photo outfit boards work offline. AI features start locked. The PC must remain awake and online for refresh, product retrieval, cutouts, and AI.
+Wardrobe is a personal Android 10+ app with an optional Windows companion. Matching, manual editing, photo colour extraction, today's weather, preferences and actual-photo outfit boards work on the phone. AI features start locked; add your own OpenAI or Gemini key or connect your ChatGPT plan in the app, and clothing analysis and styling advice run on the phone, with credentials encrypted by the Android keystore. The PC is optional — pair it for sync and try-on previews; automatic framing, product import, styling advice and clothing analysis run on the phone. The download includes the 4.6 MB detection model, so detection works offline.
 
 ## Install on Android
 
 1. Copy `Wardrobe.apk` to your phone and open it. Allow installation from the file/browser app only when Android asks. Revoke that installation permission afterward if desired.
 2. Launch **Wardrobe**. It starts empty: Today → Add your first item.
 3. Add at least a top, bottom (or a one-piece garment), and shoes. Camera access is optional; use Import photo or manual fields if denied.
-4. Crop each image, correct its colors/category, and save. Additional photos can show labels or different angles. Photos are copied into private app storage.
-5. Today offers Timeless, Balanced (default), or Trend-focused modes, occasion/weather/season controls, and up to five combinations. Build around an item, swap pieces, save, give feedback, or export an outfit board.
+4. Take or import a photo. The phone finds the garment with the bundled model and frames the photo automatically — adjust only if an edge is cut off. No PC or key is involved. Correct the colors/category and save; other angles or labels can be added as extra photos. The original gallery photo is unchanged, and the crop is copied into private app storage.
+5. Open the saved item and tap **Detect clothing**. The bundled U²-Net model runs on the phone: it removes the background, trims the photo to the garment, reads type, main colours and silhouette, and shows a review. It is free, private and needs no PC or key; if the model cannot load, a paired PC can run the same detection. Change any field you disagree with before applying; corrections are protected from later analysis. **AI analysis** and **styling advice** run on the phone with your own provider key or ChatGPT plan, no PC involved.
+6. Today offers Timeless, Balanced (default), or Trend-focused modes, occasion/weather/season controls, and up to five combinations. Add your city under Weather once: the phone fetches a keyless Open-Meteo forecast, sets warm, mild or cold from the perceived temperature, and ranks outfits for it. Build around an item, swap pieces, save, give feedback, or export an outfit board.
 
 Brand resemblance is not identification. Appearance-derived texture is not verified fabric composition. Only mark brand/composition confirmed after checking a label or exact product.
 
@@ -37,21 +38,26 @@ Disconnecting the phone preserves local data. Revoke its token from the PC dashb
 
 ## AI connections and consent
 
-Use the PC dashboard to enable and check only the connections you want:
+Open **Connections → AI connections** on the phone, or use the PC dashboard, and enable only the connections you want:
 
-- **Codex:** install the current Codex CLI and authenticate with your ChatGPT account. Wardrobe uses a clean temporary Codex home, stdio app-server, a read-only job root, disabled command tools/hooks/plugins/MCP/browser integrations, and selected job images. It does not expose the agent protocol to the phone. The setup check requires the restricted filesystem sandbox to start; Some Windows configurations reject these restricted filesystem permissions; Codex stays locked when its isolation check fails. There is deliberately no unsandboxed fallback.
+- **ChatGPT plan (phone):** sign in under Connections → AI connections with the official **Sign in with ChatGPT** flow. The phone keeps the OAuth tokens encrypted with the Android keystore and uses your plan through OpenAI's Responses API; no PC or API key is needed. This is ChatGPT plan usage, **not the Codex CLI agent**: it cannot run commands or edit files, and plan limits apply. After sign-in, choose a model under the connection; vision-capable models are marked for photo analysis, while text-only models leave analysis locked.
+- **Codex on your PC:** install the current Codex CLI and authenticate with your ChatGPT account. The Codex agent is PC-only; the phone connection above does not expose it. Wardrobe uses a clean temporary Codex home, stdio app-server, a read-only job root, disabled command tools/hooks/plugins/MCP/browser integrations, and selected job images. It does not expose the agent protocol to the phone. The setup check requires the restricted filesystem sandbox to start; Some Windows configurations reject these restricted filesystem permissions; Codex stays locked when its isolation check fails. There is deliberately no unsandboxed fallback.
 - **Claude Code:** install the current CLI and authenticate with a Claude subscription. Wardrobe uses structured print mode with safe/restricted mode, no tools, no MCP, no hooks/skills, no persisted session, and selected images. Older CLIs that lack these isolation flags fail rather than falling back to general execution.
-- **Gemini API / OpenAI API:** enter your own API key in the dashboard. Keys are protected with Windows DPAPI and never sent to the phone or included in exports. Do not paste keys into source files or scripts.
+- **Gemini API / OpenAI API:** enter your own API key in the app under Connections → AI connections, or in the PC dashboard. The phone keeps it encrypted with the Android keystore and analyses clothing and writes styling advice directly; when paired it also sends the key to your PC, which protects it with Windows DPAPI and never returns it. Neither side includes keys in exports. Do not paste keys into source files or scripts.
+
+Phone-side analysis and styling call the provider directly, so the PC's budget and free-only guards below do not cover them: they spend against your own provider account or ChatGPT plan. Saving a budget, a photo-sharing toggle or a free-only choice keeps a checked connection working; replacing or clearing the key invalidates the previous login and image check. Background trend analysis and capability probes remain PC-dashboard-only. A paired phone can only see and cancel jobs it submitted itself.
 
 Free-only is the default. OpenAI paid requests stay locked until a positive app budget is entered and free-only is disabled. Free-only Gemini requires explicit confirmation that billing is disabled on the API project; provider quota availability still applies. PC subscription connections use their account allowances. Background trend analysis is separately opt-in.
 
 The app conservatively reserves **$1 per submitted paid request** against its app budget. This is a request allowance, **not a hard provider billing cap or exact cost accounting**. A request can cost more; configure provider-side spend limits too. Failed or uncertain submitted requests retain their reservation. A successful login/models check is not proof of every runtime entitlement: unsupported/expired/quota-exhausted requests report provider failure. Vision additionally requires photo sharing; generated images additionally require a successful real image probe. Claude has no image generation/web-search route in this implementation. Codex web search is intentionally disabled. Cloud providers are never automatically configured from ambient environment keys.
 
-Review clothing analysis before applying it. Manually corrected fields are protected, stale revisions are rejected, and possibleBrand remains unconfirmed. Try-on requires explicit photo consent and a supported image route; choose your own reference under Your style or use a generic adult model. Every generated preview is approximate, not a physical-fit guarantee.
+**Detect clothing** is local, free and needs no AI connection: the bundled U²-Net weights run on the phone, mask the garment, the photo is trimmed to that mask, and type, dominant colours, fit and silhouette are read from those masked pixels only. Backgrounds therefore never enter the colour or shape reading. Detection returns a confidence value and a suggestion; the review lets you change every field before applying, and each field you change is locked against later analysis. Outlines alone cannot prove a brand, fabric or exact subtype, so low-confidence suggestions should always be checked.
+
+Review clothing analysis before applying it. Manually corrected fields are protected, stale revisions are rejected, and possibleBrand remains unconfirmed. AI analysis prefers the saved background-free cutout and reports when no background could be excluded. Try-on requires explicit photo consent and a supported image route; choose your own reference under Your style or use a generic adult model. Every generated preview is approximate, not a physical-fit guarantee.
 
 ## Products, trends, and sources
 
-Paste an exact public HTTPS product URL into Edit → Find details on PC. Select the exact item/color variant and image in the review, then explicitly confirm. Blocked, inaccessible, or unstructured pages may require manual editing. Server fetching pins public IPs and validates every redirect; local/private/Tailscale destinations are blocked.
+Paste an exact public HTTPS product URL into Edit → Find details. The phone fetches and parses the page itself; no PC or AI key is needed. Select the exact item/color variant and image in the review, then explicitly confirm. Blocked, inaccessible, or unstructured pages may require manual editing. The phone accepts only HTTPS, re-checks every redirect, blocks private/local/Tailscale hosts, caps page and image size, and re-encodes the selected image before private storage.
 
 Discover suggests nonduplicate wardrobe gaps, matching owned items, and example outfits. Connected search shows only product pages actually retrieved, available price/size information, source URLs and checked timestamps. Product variants and remote images are unconfirmed until reviewed; prices/stock are never invented.
 
@@ -74,7 +80,7 @@ The 1.0.1 APK can replace the previous signed 1.0.0 APK without uninstalling. Th
 
 ## Rebuild
 
-Clone this repository or extract its source download. Android requires JDK 17+ (tested here with JDK 21.0.11), Android SDK platform/build-tools 36 and internet for dependency resolution. Fix `JAVA_HOME` if it points to a removed JDK. Release signing uses local `mobile/signing.properties` plus its referenced keystore. Maintainers restore their private signing backup; fork builds use their own locally generated signing key. Copy `mobile/signing.properties.example` to `mobile/signing.properties` and fill it locally. No signing key is included in the source ZIP.
+Clone this repository or extract its source download. Android requires JDK 17+ (tested here with JDK 17.0.21), Android SDK platform/build-tools 36 and internet for dependency resolution. Fix `JAVA_HOME` if it points to a removed JDK. Release signing uses local `mobile/signing.properties` plus its referenced keystore. Maintainers restore their private signing backup; fork builds use their own locally generated signing key. Copy `mobile/signing.properties.example` to `mobile/signing.properties` and fill it locally. No signing key is included in the source ZIP.
 
 On a PC with limited memory, run these commands separately from the `mobile` folder in PowerShell. The smaller first-phase heap compiled the app; a fresh process with the configured 640 MiB heap then completed dex merging and packaging. Close each phase before starting the next. One worker and serial GC are already configured.
 
@@ -83,5 +89,7 @@ On a PC with limited memory, run these commands separately from the `mobile` fol
 .\gradlew.bat :app:assembleRelease
 .\gradlew.bat :app:lintRelease
 ```
+
+On Linux, install Android SDK platform/build-tools 36 and run `./gradlew :domain:test :app:assembleDebug`. The installable debug APK is `mobile/app/build/outputs/apk/debug/app-debug.apk` (debug-signed, not a release artifact). The domain test task runs the offline ChatGPT harness: OAuth URL/form coverage, a real loopback socket callback test, token/refresh parsing, model/vision parsing and Responses SSE parsing. It needs no OpenAI account.
 
 Server checks: create a Python 3.11 environment, install `server/requirements-dev.txt`, then set `PYTHONPATH=server` and run `python -m pytest server/tests`. See `VALIDATION.md` for measured checks, artifact hashes, failures and device/account checks still needed. Do not interpret a successful build as proof of camera, upgrade, cellular, or generated-preview behavior.

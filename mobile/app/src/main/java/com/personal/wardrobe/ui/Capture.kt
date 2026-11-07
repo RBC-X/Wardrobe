@@ -26,6 +26,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.personal.wardrobe.data.CropSuggestion
 import java.io.File
 
 @Composable fun CameraDialog(pairing:Boolean=false,onDismiss:()->Unit,onPhoto:(Uri)->Unit,onError:(String)->Unit){
@@ -46,16 +47,23 @@ import java.io.File
     DisposableEffect(Unit){onDispose{provider?.unbindAll()}}
 }
 
-@Composable fun CropDialog(bitmap:Bitmap,onDismiss:()->Unit,onUse:(Float,Float,Float,Float)->Unit){
+@Composable fun CropDialog(bitmap:Bitmap,suggest:(suspend (Bitmap)->CropSuggestion?)?=null,onDismiss:()->Unit,onUse:(Float,Float,Float,Float)->Unit){
     var left by remember{mutableFloatStateOf(0f)};var right by remember{mutableFloatStateOf(0f)};var top by remember{mutableFloatStateOf(0f)};var bottom by remember{mutableFloatStateOf(0f)}
+    var automatic by remember{mutableStateOf(false)};var checking by remember{mutableStateOf(suggest!=null)};var moved by remember{mutableStateOf(false)}
+    LaunchedEffect(bitmap){
+        val finder=suggest?:return@LaunchedEffect
+        val found=finder(bitmap);checking=false
+        // Only claim automatic framing when the values were actually applied; sliders moved during the request win.
+        if(found!=null&&!moved){automatic=true;left=found.left;top=found.top;right=found.right;bottom=found.bottom}
+    }
     Dialog(onDismiss,properties=DialogProperties(usePlatformDefaultWidth=false)){
         Surface(Modifier.fillMaxSize()){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
-            Text("Keep just the item",style=MaterialTheme.typography.headlineSmall);Text("Crop away the background to improve the color palette. Your original gallery photo is unchanged.")
+            Text("Keep just the item",style=MaterialTheme.typography.headlineSmall);Text(when{checking->"Finding the clothing on this phone…";automatic->"Framed automatically from the clothing outline. Adjust only if part of the item is cut off.";else->"Crop away the background to improve the color palette. Your original gallery photo is unchanged."})
             Box(Modifier.fillMaxWidth().height(300.dp)){Image(bitmap.asImageBitmap(),"Selected clothing photo",Modifier.fillMaxSize(),contentScale=ContentScale.Fit);Canvas(Modifier.fillMaxSize()){
                 val scale=minOf(size.width/bitmap.width,size.height/bitmap.height);val w=bitmap.width*scale;val h=bitmap.height*scale;val x=(size.width-w)/2;val y=(size.height-h)/2;val shade=Color.Black.copy(alpha=.50f)
                 drawRect(shade,Offset(x,y),Size(w,h*top));drawRect(shade,Offset(x,y+h*(1-bottom)),Size(w,h*bottom));drawRect(shade,Offset(x,y+h*top),Size(w*left,h*(1-top-bottom)));drawRect(shade,Offset(x+w*(1-right),y+h*top),Size(w*right,h*(1-top-bottom)))}}
-            Text("Left crop");Slider(left,{left=it},valueRange=0f..0.4f);Text("Right crop");Slider(right,{right=it},valueRange=0f..0.4f);Text("Top crop");Slider(top,{top=it},valueRange=0f..0.4f);Text("Bottom crop");Slider(bottom,{bottom=it},valueRange=0f..0.4f)
-            Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){OutlinedButton(onDismiss,Modifier.weight(1f)){Text("Cancel")};Button({onUse(left,top,right,bottom)},Modifier.weight(1f)){Text("Use photo")}}
+            Text("Left crop");Slider(left,{moved=true;left=it},valueRange=0f..0.4f);Text("Right crop");Slider(right,{moved=true;right=it},valueRange=0f..0.4f);Text("Top crop");Slider(top,{moved=true;top=it},valueRange=0f..0.4f);Text("Bottom crop");Slider(bottom,{moved=true;bottom=it},valueRange=0f..0.4f)
+            Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){OutlinedButton(onDismiss,Modifier.weight(1f)){Text("Cancel")};Button({onUse(left,top,right,bottom)},Modifier.weight(1f),enabled=!checking||moved){Text("Use photo")}}
         }}
     }
 }

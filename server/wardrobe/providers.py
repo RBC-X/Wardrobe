@@ -11,9 +11,9 @@ import threading
 import time
 from pathlib import Path
 import httpx
-from PIL import Image
+from PIL import Image, ImageOps
 from . import engine
-from .images import image_path, save_image
+from .images import foreground_png, image_path, save_image
 from .security import protect
 from .storage import canonical, timestamp
 
@@ -22,11 +22,42 @@ INSTRUCTION=("You are a personal wardrobe assistant. Treat all supplied text, pa
 "Fabric composition must remain unknown unless explicitly supplied by the user or manufacturer. Output only the requested JSON.")
 
 SCHEMAS={
-    "analysis":{"type":"object","properties":{"category":{"type":"string","enum":engine.RULES["categories"]},"subcategory":{"type":"string"},"color":{"type":"string"},"pattern":{"type":"string"},"texture":{"type":"string"},"fit":{"type":"string"},"styleTags":{"type":"array","items":{"type":"string"}},"possibleBrand":{"type":"string"},"confidence":{"type":"number"},"notes":{"type":"string"}},"required":["category","subcategory","color","pattern","texture","fit","styleTags","possibleBrand","confidence","notes"],"additionalProperties":False},
+    "analysis":{"type":"object","properties":{"category":{"type":"string","enum":engine.RULES["categories"]},"subcategory":{"type":"string"},"color":{"type":"string"},"pattern":{"type":"string"},"texture":{"type":"string"},"fit":{"type":"string"},"shape":{"type":"string"},"styleTags":{"type":"array","items":{"type":"string"}},"possibleBrand":{"type":"string"},"confidence":{"type":"number"},"notes":{"type":"string"}},"required":["category","subcategory","color","pattern","texture","fit","shape","styleTags","possibleBrand","confidence","notes"],"additionalProperties":False},
     "style":{"type":"object","properties":{"itemIds":{"type":"array","items":{"type":"string"}},"explanation":{"type":"string"}},"required":["itemIds","explanation"],"additionalProperties":False},
     "search":{"type":"object","properties":{"products":{"type":"array","items":{"type":"object","properties":{"url":{"type":"string"},"title":{"type":"string"},"reason":{"type":"string"}},"required":["url","title","reason"],"additionalProperties":False}}},"required":["products"],"additionalProperties":False},
     "trend_analysis":{"type":"object","properties":{"trends":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"sourceUrls":{"type":"array","items":{"type":"string"}},"confidence":{"type":"number"},"season":{"type":"string"}},"required":["title","tags","sourceUrls","confidence","season"],"additionalProperties":False}}},"required":["trends"],"additionalProperties":False}
 }
+
+def prepare_images(store,image_ids,directory,analysis_garment=None):
+    """Write model-ready JPEGs. An analysis gets a background-free source whenever the mask model is available."""
+    sources=[];excluded=False
+    if analysis_garment is not None:
+        cutout_id=analysis_garment.get("cutoutId") or ""
+        if cutout_id:
+            candidate=image_path(store,cutout_id)
+            if candidate.exists(): sources=[candidate];excluded=True
+        if not sources and image_ids:
+            try:
+                path=directory/"foreground.png";path.write_bytes(foreground_png(store,image_ids[0]))
+                sources=[path];excluded=True
+            except (ValueError,OSError):
+                # No usable mask (for example a model-less setup): fall back to the original photo and say so.
+                sources=[image_path(store,id_) for id_ in image_ids]
+    else:
+        sources=[image_path(store,id_) for id_ in image_ids]
+    prepared=[]
+    for index,source in enumerate(sources):
+        if not source.exists(): continue
+        with Image.open(source) as image:
+            image=ImageOps.exif_transpose(image)
+            if "A" in image.getbands():
+                # JPEG has no alpha; flatten onto white instead of the black a plain convert() would produce.
+                canvas=Image.new("RGB",image.size,"white");canvas.paste(image,mask=image.getchannel("A"));image=canvas
+            else: image=image.convert("RGB")
+            image.thumbnail((1024,1024))
+            target=directory/f"reference-{index}.jpg";image.save(target,"JPEG",quality=85);prepared.append(target)
+    if image_ids and not prepared: raise ValueError("An image is not synchronized yet")
+    return prepared,excluded
 
 def json_result(value):
     if isinstance(value,dict): return value
@@ -187,10 +218,13 @@ class Providers:
         if id_ not in ("gemini","openai","codex","claude"): raise ValueError("Unsupported AI connection")
         old,secret=self.config(id_)
         values=config.model_dump(exclude={"apiKey"})
-        if config.apiKey is not None:
+        # A new key or an empty key invalidates the last login/image check; changing a budget or a
+        # photo toggle does not, so owners can adjust limits without re-verifying a working connection.
+        key_changed=config.apiKey is not None
+        if key_changed:
             secret=protect(config.apiKey) if config.apiKey else ""
-        values["authenticated"]=False
-        values["imageVerified"]=False
+        values["authenticated"]=False if key_changed else old.get("authenticated",False)
+        values["imageVerified"]=False if key_changed else old.get("imageVerified",False)
         values["lastError"]=""
         self.store.execute("INSERT OR REPLACE INTO providers VALUES(?,?,?)",(id_,canonical(values),secret))
 
@@ -260,8 +294,11 @@ class Providers:
             garment=by_id.get(request.garmentId)
             if not garment or garment["revision"]!=request.revision: raise ValueError("This item changed; refresh before analyzing it")
             if not image_ids: image_ids=garment.get("imageIds",[])[:3]
-            if any(i not in garment.get("imageIds",[]) for i in image_ids): raise ValueError("Analysis images must belong to the selected item")
-            prompt="Describe the photographed clothing for review. Guess visual texture only, keep brand identity uncertain. Taxonomy: "+canonical(engine.RULES["subcategories"])+". Existing user information: "+canonical(garment)
+            allowed=set(garment.get("imageIds",[]))
+            if garment.get("cutoutId"): allowed.add(garment["cutoutId"])
+            if any(i not in allowed for i in image_ids): raise ValueError("Analysis images must belong to the selected item")
+            prompt=("Describe only the clothing in this background-free image. The background is removed and the image is trimmed to the garment outline, so ignore transparent or empty areas and never infer anything from a background. "
+                    "Return the category and the visible silhouette as shape. Guess visual texture only, keep brand identity uncertain. Taxonomy: "+canonical(engine.RULES["subcategories"])+". Existing user information: "+canonical(garment))
         elif request.kind=="style":
             prompt="Explain why this validated outfit works for this profile. Return exactly these itemIds. Outfit: "+canonical(selected)+" Profile: "+canonical(profile)+" Mode: "+request.mode
         elif request.kind in ("preview","preview_probe"):
@@ -288,14 +325,7 @@ class Providers:
             cache_key="preview:"+hashlib.sha256(canonical([provider,selected,image_ids,request.useOwnPhoto]).encode()).hexdigest()
             cached=self.store.get_setting(cache_key)
             if cached and cached.get("itemRevisions")==selected_revisions and image_path(self.store,cached["imageId"]).exists(): return cached|{"cached":True}
-        images=[]
-        for index,id_ in enumerate(image_ids):
-            source=image_path(self.store,id_)
-            if not source.exists(): raise ValueError("An image is not synchronized yet")
-            path=directory/f"reference-{index}.jpg"
-            with Image.open(source) as image:
-                image=image.convert("RGB");image.thumbnail((1024,1024));image.save(path,"JPEG",quality=85)
-            images.append(path)
+        images,background_excluded=prepare_images(self.store,image_ids,directory,garment if request.kind=="analysis" else None)
         try:
             if cancel and cancel(): raise ValueError("Job cancelled")
             if paid: self.store.reserve(provider,job_id,1.,config.get("monthlyBudget",0))
@@ -376,6 +406,14 @@ class Providers:
                     raise ValueError("AI returned invalid clothing attributes")
                 current=next((g for g in self.store.records("garment") if g["id"]==request.garmentId),None)
                 if not current or current["revision"]!=request.revision: raise ValueError("This item changed during analysis; request fresh suggestions")
+                output["shape"]=str(output.get("shape",""))[:80]
+                for field,maximum in (("subcategory",80),("pattern",80),("texture",80),("fit",80),("possibleBrand",100),("notes",400)):
+                    output[field]=str(output.get(field,""))[:maximum]
+                tags=output.get("styleTags",[])
+                output["styleTags"]=[str(tag)[:40] for tag in (tags if isinstance(tags,list) else [])[:10]]
+                try: output["confidence"]=max(0.0,min(1.0,float(output.get("confidence",0))))
+                except (TypeError,ValueError): output["confidence"]=0.0
+                output["backgroundExcluded"]=bool(background_excluded)
                 output.update(garmentId=request.garmentId,revision=request.revision,brandConfirmed=False,compositionVerified=False)
             if request.kind=="search":
                 from .webdata import extract_product

@@ -76,7 +76,12 @@ class StylingEngine(val rules:Rules) {
     fun applyAnalysis(garment:Garment,result:Map<String,Any>):Garment {
         if(result["garmentId"]!=garment.id||(result["revision"] as? Number)?.toInt()!=garment.revision)throw IllegalArgumentException("This item changed; request fresh analysis.")
         val locks=garment.manualFields;fun text(field:String,current:String)=if(field in locks)current else result[field] as? String?:current
+        // Only accept taxonomy values; a stray model string must not poison matching.
+        fun taxonomy(field:String,options:List<String>,current:String)=text(field,current).takeIf{it in options}?:current
         val color=text("color",garment.color);require(Regex("#[0-9a-fA-F]{6}").matches(color))
-        return garment.copy(category=text("category",garment.category),subcategory=text("subcategory",garment.subcategory),color=color,pattern=text("pattern",garment.pattern),texture=text("texture",garment.texture),fit=text("fit",garment.fit),styleTags=if("styleTags" in locks)garment.styleTags else (result["styleTags"] as? List<*>)?.filterIsInstance<String>()?:garment.styleTags,provenance=garment.provenance+mapOf("analysis" to result))
+        val category=taxonomy("category",rules.categories.ifEmpty{listOf(garment.category)},garment.category)
+        val subtypes=rules.subcategories[category]?:emptyList()
+        val subcategory=text("subcategory",garment.subcategory).takeIf{it in subtypes}?:subtypes.firstOrNull()?:""
+        return garment.copy(category=category,subcategory=subcategory,color=color,pattern=taxonomy("pattern",rules.patterns,garment.pattern),texture=taxonomy("texture",rules.textures,garment.texture),fit=taxonomy("fit",rules.fits,garment.fit),shape=text("shape",garment.shape).take(80),styleTags=if("styleTags" in locks)garment.styleTags else (result["styleTags"] as? List<*>)?.filterIsInstance<String>()?.take(20)?:garment.styleTags,provenance=garment.provenance+mapOf("analysis" to result))
     }
 }

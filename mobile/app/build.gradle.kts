@@ -11,6 +11,7 @@ android {
     kotlinOptions { jvmTarget="17" }
     buildFeatures { compose=true; buildConfig=true }
     sourceSets["main"].assets.srcDir(rootProject.file("../shared"))
+    sourceSets["main"].assets.srcDir(rootProject.file("../models"))
 }
 ksp { arg("room.schemaLocation", "$projectDir/schemas") }
 dependencies {
@@ -35,5 +36,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.google.code.gson:gson:2.13.1")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     testImplementation("junit:junit:4.13.2")
 }

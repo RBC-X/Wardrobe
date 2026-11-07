@@ -58,5 +58,13 @@ class ApiClient(private val connection:Connection){
         client.newCall(request(path,method,payload,authenticated,base)).execute().use{response->val raw=response.body?.string()?:"{}";if(!response.isSuccessful){val message=runCatching{gson.fromJson(raw,com.google.gson.JsonObject::class.java)["detail"].asString}.getOrDefault("PC request failed (${response.code})");throw ApiException(response.code,message)};gson.fromJson(raw,com.google.gson.JsonObject::class.java)}
     }
     suspend fun upload(id:String,bytes:ByteArray)=withContext(Dispatchers.IO){client.newCall(request("/v1/media/$id","PUT",bytes.toRequestBody("application/octet-stream".toMediaType()))).execute().use{if(!it.isSuccessful)throw IOException("Photo upload failed (${it.code})")};Unit}
+    suspend fun suggestCrop(bytes:ByteArray):com.google.gson.JsonObject=withContext(Dispatchers.IO){
+        require(bytes.size<=8_000_000){"Photo is too large"}
+        client.newCall(request("/v1/photos/suggest-crop","POST",bytes.toRequestBody("application/octet-stream".toMediaType()))).execute().use{response->
+            val raw=response.body?.string()?:"{}"
+            if(!response.isSuccessful){val message=runCatching{gson.fromJson(raw,com.google.gson.JsonObject::class.java)["detail"].asString}.getOrDefault("Automatic crop failed (${response.code})");throw ApiException(response.code,message)}
+            gson.fromJson(raw,com.google.gson.JsonObject::class.java)
+        }
+    }
     suspend fun download(id:String):ByteArray=withContext(Dispatchers.IO){require(Regex("[a-f0-9]{64}").matches(id));client.newCall(request("/v1/media/$id","GET",null)).execute().use{response->if(!response.isSuccessful)throw IOException("Photo download failed (${response.code})");val input=response.body?.byteStream()?:throw IOException("Empty photo response");val output=java.io.ByteArrayOutputStream();val buffer=ByteArray(16384);var total=0;while(true){val count=input.read(buffer);if(count<0)break;total+=count;require(total<=8_000_000){"Photo is too large"};output.write(buffer,0,count)};output.toByteArray()}}
 }

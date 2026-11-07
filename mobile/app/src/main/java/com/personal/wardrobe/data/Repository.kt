@@ -1,6 +1,7 @@
 package com.personal.wardrobe.data
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.room.Room
 import androidx.room.withTransaction
@@ -18,17 +19,38 @@ import java.util.UUID
 import java.util.zip.*
 
 data class WardrobeSnapshot(val garments:List<Garment> = emptyList(),val profile:Profile=Profile(),val outfits:List<Outfit> = emptyList())
-data class ProviderCapability(val id:String="",val enabled:Boolean=false,val authenticated:Boolean=false,val text:Boolean=false,val vision:Boolean=false,val webSearch:Boolean=false,val imageGeneration:Boolean=false,val reason:String="Connect AI on your PC")
+data class CropSuggestion(val left:Float,val top:Float,val right:Float,val bottom:Float)
+data class ProviderCapability(val id:String="",val enabled:Boolean=false,val authenticated:Boolean=false,val text:Boolean=false,val vision:Boolean=false,val webSearch:Boolean=false,val imageGeneration:Boolean=false,val imageProbe:Boolean=false,val hasKey:Boolean=false,val config:JsonObject?=null,val reservedThisMonth:Double=0.0,val reason:String="Connect AI on your PC")
 data class Job(val id:String="",val kind:String="",val provider:String="",val status:String="",val result:JsonObject?=null,val error:String="",val createdAt:String="",val updatedAt:String="")
 
 class Repository(val context:Context){
-    val gson=Gson();val connection=Connection(context);val api=ApiClient(connection);val photos=Photos(context)
+    val gson=Gson();val connection=Connection(context);val api=ApiClient(connection);val photos=Photos(context);val secrets=Secrets(context);val phoneAi=PhoneAi(secrets);val chatGpt=ChatGpt(context,secrets);val onDevice=OnDevice(context,photos);private val weatherClient=WeatherClient();val productImport=ProductImport(photos)
     val database=Room.databaseBuilder(context,WardrobeDatabase::class.java,"wardrobe.db").build()
     val dao=database.dao();private val syncMutex=Mutex()
     val snapshot=dao.observeRecords().map{rows->WardrobeSnapshot(rows.filter{it.kind=="garment"&&!it.deleted}.map{gson.fromJson(it.payload,Garment::class.java)},rows.firstOrNull{it.kind=="profile"&&!it.deleted}?.let{gson.fromJson(it.payload,Profile::class.java)}?:Profile(),rows.filter{it.kind=="outfit"&&!it.deleted}.map{gson.fromJson(it.payload,Outfit::class.java)})}
     fun assetRules():Rules=context.assets.open("rules.json").bufferedReader().use{gson.fromJson(it,Rules::class.java)}
     suspend fun rules():Rules=dao.cache("rules")?.let{gson.fromJson(it,Rules::class.java)}?:assetRules()
     suspend fun trends():List<Trend> = dao.cache("trends")?.let{gson.fromJson(it,object:TypeToken<List<Trend>>(){}.type)}?:emptyList()
+    suspend fun weather():WeatherNow?=dao.cache("weather")?.let{runCatching{gson.fromJson(it,WeatherNow::class.java)}.getOrNull()}
+    suspend fun weatherPlace():String=dao.cache("weatherPlace")?:""
+    /** Keyless and phone-only, so outfit ranking still works while the PC is asleep. */
+    suspend fun refreshWeather(place:String):WeatherNow=withContext(Dispatchers.IO){val result=weatherClient.forecast(place);dao.cache(CacheEntity("weather",gson.toJson(result)));dao.cache(CacheEntity("weatherPlace",place.trim()));result}
+    suspend fun analyzeOnPhone(item:Garment,provider:String):JsonObject {
+        require(item.imageIds.isNotEmpty()){"Add a photo first"}
+        val cutout=item.cutoutId.takeIf{it.isNotEmpty()}?.let{runCatching{photos.file(it)}.getOrNull()}
+        val file=cutout?.takeIf{it.exists()}?:photos.file(item.imageIds.first())
+        require(file.exists()){"This photo is still transferring"}
+        val excluded=cutout!=null&&cutout.exists()&&file.path==cutout.path
+        if(provider=="chatgpt")return chatGpt.analyze(item,file,rules(),excluded)
+        return phoneAi.analyze(item,file,rules(),provider,backgroundExcluded=excluded)
+    }
+    /** Background-free detection on this phone: no key, no network and no PC. */
+    suspend fun detectOnDevice(item:Garment):JsonObject {
+        require(item.imageIds.isNotEmpty()){"Add a photo first"}
+        val file=photos.file(item.imageIds.first())
+        require(file.exists()){"This photo is still transferring"}
+        return onDevice.detect(file,item.id,item.revision,item.imageIds.first())
+    }
     suspend fun cachedJobs():List<Job> = dao.cache("jobs")?.let{gson.fromJson(it,object:TypeToken<List<Job>>(){}.type)}?:emptyList()
     suspend fun feeds():JsonArray=dao.cache("feeds")?.let{JsonParser.parseString(it).asJsonArray}?:JsonArray()
     suspend fun lastRefresh():String=dao.cache("lastRefresh")?:"Never refreshed"
@@ -36,13 +58,29 @@ class Repository(val context:Context){
         database.withTransaction{val old=dao.record(kind,id);val json=gson.toJsonTree(payload).asJsonObject;val revision=(old?.revision?:0)+1;json.addProperty("revision",revision);val text=gson.toJson(json)
             dao.upsert(RecordEntity(kind,id,revision,text,deleted));dao.queue(ChangeEntity(UUID.randomUUID().toString(),kind,id,revision,deleted,text))}
     }
-    suspend fun saveGarment(garment:Garment){require(garment.name.isNotBlank());require(garment.category in assetRules().categories);require(Regex("#[0-9a-fA-F]{6}").matches(garment.color));save("garment",garment.id,garment.copy(updatedAt=Instant.now().toString()))}
+    suspend fun saveGarment(garment:Garment){require(garment.name.isNotBlank()){"Give this piece a name"};require(garment.name.length<=200){"Keep the name under 200 characters"};require(garment.category in assetRules().categories);require(Regex("#[0-9a-fA-F]{6}").matches(garment.color)){"Use a six-digit hex colour"};save("garment",garment.id,garment.copy(shape=garment.shape.take(80),updatedAt=Instant.now().toString()))}
     suspend fun deleteGarment(garment:Garment)=save("garment",garment.id,garment.copy(deleted=true,updatedAt=Instant.now().toString()),true)
     suspend fun saveProfile(profile:Profile)=save("profile",profile.id,profile)
     suspend fun saveOutfit(outfit:Outfit)=save("outfit",outfit.id,outfit)
     suspend fun deleteOutfit(outfit:Outfit)=save("outfit",outfit.id,outfit,true)
     suspend fun pair(value:String){val data=JsonParser.parseString(value).asJsonObject;require(data["version"].asInt==1){"Unsupported pairing code"};val url=api.validateUrl(data["url"].asString);val result=api.json("/v1/pair","POST",mapOf("code" to data["code"].asString,"deviceName" to android.os.Build.MODEL),false,url);connection.url=url;connection.token=result["token"].asString;dao.resetUploads();dao.cache(CacheEntity("cursor","0"));for(row in dao.records())dao.queue(ChangeEntity(UUID.randomUUID().toString(),row.kind,row.id,row.revision,row.deleted,row.payload))}
     suspend fun capabilities():List<ProviderCapability>{val result=api.json("/v1/capabilities");return gson.fromJson(result["providers"],object:TypeToken<List<ProviderCapability>>(){}.type)}
+    /** Ask this owner's PC to frame a new photo; null keeps the manual crop available offline. */
+    suspend fun suggestCrop(bitmap:Bitmap):CropSuggestion?=withContext(Dispatchers.IO){
+        // The bundled model already runs on the phone; the PC is only a fallback if it cannot load.
+        runCatching{onDevice.suggestCrop(bitmap)}.getOrNull()?.let{return@withContext it}
+        if(!connection.paired)return@withContext null
+        runCatching{
+            val scale=minOf(1f,1400f/maxOf(bitmap.width,bitmap.height))
+            val sample=if(scale<1)Bitmap.createScaledBitmap(bitmap,(bitmap.width*scale).toInt(),(bitmap.height*scale).toInt(),true)else bitmap
+            val output=ByteArrayOutputStream();sample.compress(Bitmap.CompressFormat.JPEG,85,output);if(sample!==bitmap)sample.recycle()
+            val result=api.suggestCrop(output.toByteArray())
+            if(result["found"]?.asBoolean!=true)null else CropSuggestion(result["left"].asFloat.coerceIn(0f,.4f),result["top"].asFloat.coerceIn(0f,.4f),result["right"].asFloat.coerceIn(0f,.4f),result["bottom"].asFloat.coerceIn(0f,.4f))
+        }.getOrNull()
+    }
+    suspend fun providers():List<ProviderCapability>{val result=api.json("/v1/providers");return gson.fromJson(result["providers"],object:TypeToken<List<ProviderCapability>>(){}.type)}
+    suspend fun configureProvider(id:String,values:Map<String,Any?>):ProviderCapability=gson.fromJson(api.json("/v1/providers/$id","PUT",values),ProviderCapability::class.java)
+    suspend fun testProvider(id:String):ProviderCapability=gson.fromJson(api.json("/v1/providers/$id/test","POST"),ProviderCapability::class.java)
     suspend fun sync():String=syncMutex.withLock {
         withContext(Dispatchers.IO){
             require(connection.paired){"Pair your phone with your PC first"}
@@ -81,8 +119,11 @@ class Repository(val context:Context){
     suspend fun submit(kind:String,provider:String,values:Map<String,Any>):Job {sync();val payload=mapOf("kind" to kind,"provider" to provider,"requestId" to UUID.randomUUID().toString())+values;val response=try{api.json("/v1/jobs","POST",payload)}catch(error:IOException){if(error is ApiException)throw error;api.json("/v1/jobs","POST",payload)};return gson.fromJson(response,Job::class.java)}
     suspend fun job(id:String):Job=gson.fromJson(api.json("/v1/jobs/$id"),Job::class.java)
     suspend fun cancelJob(id:String)=api.json("/v1/jobs/$id/cancel","POST")
-    suspend fun product(url:String):JsonObject=api.json("/v1/products/import","POST",mapOf("url" to url))
-    suspend fun productImage(url:String):String {val result=api.json("/v1/products/image","POST",mapOf("url" to url));val id=result["imageId"].asString;photos.put(api.download(id),id);return id}
+    suspend fun product(url:String):JsonObject=productImport.product(url)
+    suspend fun productImage(url:String):String=productImport.image(url)
+    suspend fun styleOnPhone(outfit:Outfit,items:List<Garment>,profile:Profile,provider:String):JsonObject=if(provider=="chatgpt")chatGpt.style(outfit,items,profile) else phoneAi.style(outfit,items,profile,provider)
+    fun localProviders():List<ProviderCapability> = phoneAi.providers()+chatGpt.providers()
+    fun phoneAvailable(id:String)=phoneAi.available(id)||chatGpt.available(id)
     suspend fun exportBackup(uri:Uri)=withContext(Dispatchers.IO){
         context.contentResolver.openOutputStream(uri)?.use{stream->ZipOutputStream(stream).use{zip->val payload=mapOf("schemaVersion" to 1,"records" to dao.records(),"cache" to dao.caches().filter{it.key in setOf("rules","trends","feeds")});zip.putNextEntry(ZipEntry("wardrobe-phone.json"));zip.write(gson.toJson(payload).toByteArray());zip.closeEntry();for(file in photos.files()){zip.putNextEntry(ZipEntry("media/${file.name}"));file.inputStream().use{it.copyTo(zip)};zip.closeEntry()}}}?:throw IOException("Cannot write backup")
     }

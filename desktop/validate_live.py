@@ -56,6 +56,9 @@ def main():
                 cursor=a.json()["cursor"]
             check("601 changes accepted",cursor==601,f"{time.perf_counter()-start:.3f}s")
             check("photo hash roundtrip",hashlib.sha256(c.get("/v1/media/"+id_,headers=auth).content).hexdigest()==id_)
+            crop_start=time.perf_counter();framed=c.post("/v1/photos/suggest-crop",headers=auth,content=data)
+            box=framed.json() if framed.status_code==200 else {}
+            check("automatic photo framing",framed.status_code==200 and box.get("found") is True and all(0<=box.get(key,1)<=.4 for key in ("left","top","right","bottom")) and box.get("left",0)>.01 and box.get("top",0)>.01,f"{time.perf_counter()-crop_start:.3f}s; "+str({key:box.get(key) for key in ("left","top","right","bottom")}))
             check("unconfigured AI locked",c.post("/v1/jobs",headers=auth,json={"kind":"style","provider":"openai","requestId":"locked"}).status_code==403)
             start=time.perf_counter();r=c.post("/v1/jobs",headers=auth,json={"kind":"cutout","provider":"local","imageIds":[id_],"garmentId":"item-0","revision":1,"requestId":"cutout-check"});r.raise_for_status();job=r.json()
             end=time.monotonic()+60
@@ -67,6 +70,23 @@ def main():
                 result=c.get("/v1/media/"+job["result"]["imageId"],headers=auth);result.raise_for_status()
                 (root/"cutout.png").write_bytes(result.content)
                 with Image.open(io.BytesIO(result.content)) as png:check("alpha PNG and revision",png.mode=="RGBA" and job["result"]["revision"]==1)
+            detect_start=time.perf_counter()
+            r=c.post("/v1/jobs",headers=auth,json={"kind":"detect","provider":"local","imageIds":[id_],"garmentId":"item-0","revision":1,"requestId":"detect-check"});r.raise_for_status();job=r.json()
+            end=time.monotonic()+90
+            while job["status"] in ("queued","running") and time.monotonic()<end:
+                time.sleep(.25);job=c.get("/v1/jobs/"+job["id"],headers=auth).json()
+            detection=job.get("result") or {}
+            check("background-free detection",job["status"]=="completed" and detection.get("backgroundExcluded") is True and detection.get("category") in ("top","bottom","onepiece","outerwear","shoes","accessory"),f"{time.perf_counter()-detect_start:.3f}s; "+job.get("error",""))
+            if job["status"]=="completed":
+                color=detection.get("color","#000000")
+                check("detection read garment colour and shape",bool(detection.get("shape")) and all(abs(int(color[position:position+2],16)-target)<=45 for position,target in ((1,0x3d),(3,0x66),(5,0x99))),str(color)+" · "+str(detection.get("shape")))
+                preview=c.get("/v1/media/"+detection["cutoutId"],headers=auth);preview.raise_for_status()
+                (root/"detection.png").write_bytes(preview.content)
+                with Image.open(io.BytesIO(preview.content)) as png:check("trimmed transparent detection",png.mode=="RGBA" and png.width<320 and png.height<320,f"{png.width}x{png.height}")
+            if os.name=="nt":
+                saved=c.put("/v1/providers/openai",headers=auth,json={"enabled":False,"apiKey":"delivery-check-placeholder","freeOnly":True})
+                check("AI key entered from the phone",saved.status_code==200 and saved.json().get("hasKey") is True and "delivery-check-placeholder" not in saved.text)
+                check("agent providers remain PC-only",c.put("/v1/providers/codex",headers=auth,json={"enabled":True}).status_code==403)
             backup=c.get("/admin/backup",headers=admin);backup.raise_for_status()
             with zipfile.ZipFile(io.BytesIO(backup.content)) as z:
                 check("backup excludes credentials",not any("token" in n or "sqlite" in n for n in z.namelist()))
@@ -78,7 +98,7 @@ def main():
                 memory=json.loads(ps.stdout);records.append({"check":"server memory bytes","metrics":memory});print("MEMORY",memory)
             c.post("/admin/shutdown",headers=admin).raise_for_status()
             process.wait(timeout=35);check("graceful stop",process.returncode==0)
-        output=ROOT/"runtime/final-checks/live-validation.json";output.write_text(json.dumps({"checks":records,"dataDirectory":str(root)},indent=2))
+        output=ROOT/"runtime/final-checks/live-validation.json";output.parent.mkdir(parents=True,exist_ok=True);output.write_text(json.dumps({"checks":records,"dataDirectory":str(root)},indent=2))
         print("Saved",output)
         if any(r.get("passed") is False for r in records):sys.exit(1)
     finally:

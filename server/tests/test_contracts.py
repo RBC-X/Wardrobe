@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import queue
 import socket
 import time
@@ -42,6 +43,14 @@ def pc(tmp_path):
 def image_bytes():
     data=io.BytesIO();Image.new("RGB",(128,128),"blue").save(data,"JPEG");return data.getvalue()
 
+@pytest.fixture
+def fake_protector(monkeypatch):
+    """Stand-in for Windows DPAPI so request handling is testable on any host."""
+    from wardrobe import providers as module
+    def protect(value,decrypt=False):
+        return base64.b64decode(value.encode()).decode() if decrypt else base64.b64encode(value.encode()).decode()
+    monkeypatch.setattr(module,"protect",protect)
+
 def test_empty_install_has_no_placeholders(pc):
     client,app,_,headers,_=pc
     assert app.state.store.records("garment")==[]
@@ -50,7 +59,7 @@ def test_empty_install_has_no_placeholders(pc):
 
 def test_private_routes_require_auth(pc):
     client,*_=pc
-    for path in ("/admin/status","/admin/backup","/v1/capabilities","/v1/recommendations"):
+    for path in ("/admin/status","/admin/backup","/v1/capabilities","/v1/providers","/v1/recommendations"):
         assert client.get(path).status_code==401
 
 def test_pairing_single_use_expired_and_revoked(pc):
@@ -176,10 +185,14 @@ def test_capabilities_independent_and_image_probe_required(store):
     providers.update("gemini",freeProjectConfirmed=True);assert providers.capabilities("gemini")["text"]
     assert not providers.capabilities("gemini")["imageGeneration"]
 
-def test_api_secret_dpapi_and_backup_exclusion(pc):
-    client,app,admin,headers,_=pc
+@pytest.mark.skipif(os.name!="nt",reason="DPAPI is Windows-only; the key flow is covered with a stand-in protector")
+def test_windows_dpapi_roundtrip():
     secret="test-key-not-a-real-credential"
     assert protect(protect(secret),decrypt=True)==secret
+
+def test_api_secret_dpapi_and_backup_exclusion(pc,fake_protector):
+    client,app,admin,headers,_=pc
+    secret="test-key-not-a-real-credential"
     client.put("/admin/providers/gemini",headers=admin,json={"enabled":False,"apiKey":secret})
     assert secret not in canonical(app.state.store.query("SELECT * FROM providers"))
     data=client.get("/admin/backup",headers=admin).content
@@ -299,7 +312,7 @@ def test_shutdown_requires_admin_and_host_callback(pc):
     assert client.post("/admin/shutdown",headers=admin).json()=={"stopping":True}
     assert called==[True]
 
-def test_api_route_preserves_manual_fields_and_uses_selected_data(store,monkeypatch):
+def test_api_route_preserves_manual_fields_and_uses_selected_data(store,monkeypatch,fake_protector):
     from wardrobe import providers as module
     item=garment("t","top",manualFields=["color"],color="#112233");store.sync(SyncRequest(changes=[change(item)]))
     p=Providers(store);p.configure("openai",ProviderConfig(enabled=True,apiKey="fake-not-a-real-key",freeOnly=False,monthlyBudget=3,allowPhotos=True));p.update("openai",authenticated=True)
@@ -369,3 +382,128 @@ def test_backup_path_traversal_rejected(pc):
     with zipfile.ZipFile(buffer,"w") as archive:
         archive.writestr("wardrobe.json",canonical({"schemaVersion":1,"records":[]}));archive.writestr("media/../escape",b"bad")
     assert client.post("/admin/restore",headers=admin,content=buffer.getvalue()).status_code==400
+
+def test_detection_reads_colour_only_inside_the_mask():
+    import numpy as np
+    from wardrobe.detect import classify, dominant_colors, profile, shape
+    alpha=np.zeros((200,120),dtype="uint8");alpha[20:180,30:90]=255
+    rgba=Image.new("RGBA",(120,200),(250,10,10,255))
+    for y in range(20,180):
+        for x in range(30,90):rgba.putpixel((x,y),(61,102,153,255))
+    colors=dominant_colors(rgba,alpha)
+    assert colors[0]=="#3d6699"
+    assert all(abs(int(color[1:3],16)-250)>60 for color in colors)
+    metrics=profile(alpha)
+    assert metrics["aspect"]>1.8
+    category,confidence=classify(metrics,0.4)
+    assert category in ("bottom","onepiece","outerwear","top") and .3<=confidence<=.85
+    assert shape(metrics) and shape(metrics)==shape(metrics)
+
+def test_automatic_crop_requires_pairing(pc):
+    client,*_=pc
+    assert client.post("/v1/photos/suggest-crop",content=image_bytes()).status_code==401
+
+def test_crop_suggestion_frames_only_the_masked_area(monkeypatch):
+    import numpy as np
+    from wardrobe import images
+    alpha=np.zeros((200,100),dtype="uint8");alpha[40:160,20:80]=255
+    monkeypatch.setattr(images,"_mask",lambda image:alpha)
+    monkeypatch.setattr(images,"_upright",lambda source:source.convert("RGB"))
+    photo=io.BytesIO();Image.new("RGB",(100,200),"white").save(photo,"JPEG")
+    result=images.crop_suggestion(photo.getvalue())
+    assert result=={"found":True,"left":.17,"top":.17,"right":.17,"bottom":.17}
+
+def test_crop_suggestion_keeps_a_usable_frame(monkeypatch):
+    import numpy as np
+    from wardrobe import images
+    alpha=np.zeros((200,100),dtype="uint8");alpha[:,0:8]=255
+    monkeypatch.setattr(images,"_mask",lambda image:alpha)
+    monkeypatch.setattr(images,"_upright",lambda source:source.convert("RGB"))
+    photo=io.BytesIO();Image.new("RGB",(100,200),"white").save(photo,"JPEG")
+    result=images.crop_suggestion(photo.getvalue())
+    assert result["found"] is True and result["left"]==0.0 and result["right"]==.4
+
+def test_automatic_crop_returns_the_pc_frame(pc,monkeypatch):
+    client,app,_,headers,_=pc
+    monkeypatch.setattr("wardrobe.app.crop_suggestion",lambda data:{"found":True,"left":.12,"top":.2,"right":.05,"bottom":.14})
+    response=client.post("/v1/photos/suggest-crop",headers=headers,content=image_bytes())
+    assert response.status_code==200
+    assert response.json()=={"found":True,"left":.12,"top":.2,"right":.05,"bottom":.14}
+
+def test_local_detection_job_returns_review(store,monkeypatch):
+    from wardrobe import app as module
+    item=garment("t","top",imageIds=["1"*64]);store.sync(SyncRequest(changes=[change(item)]))
+    monkeypatch.setattr(module,"detect_clothing",lambda *_:{"category":"top","subcategory":"","color":"#3d6699","secondaryColors":[],"shape":"straight silhouette","fit":"regular","confidence":.6,"cutoutId":"0"*64,"backgroundExcluded":True})
+    worker=Worker(store,Providers(store))
+    try:
+        id_=worker.enqueue(JobRequest(kind="detect",provider="local",garmentId="t",revision=1,imageIds=["1"*64],requestId="detect-check"),"device-a")
+        end=time.monotonic()+3
+        while time.monotonic()<end:
+            row=store.query("SELECT status,result,deviceId FROM jobs WHERE id=?",(id_,))[0]
+            if row["status"]=="completed":break
+            time.sleep(.02)
+        result=json.loads(row["result"])
+        assert result["garmentId"]=="t" and result["revision"]==1 and result["backgroundExcluded"] is True
+        assert row["deviceId"]=="device-a"
+    finally:
+        worker.stop.set();worker.thread.join(timeout=3)
+
+def test_jobs_are_private_to_the_paired_device(pc):
+    client,app,admin,headers,pairing=pc
+    from wardrobe.storage import timestamp
+    app.state.store.execute("INSERT INTO jobs(id,requestId,kind,provider,status,request,result,error,createdAt,updatedAt,deviceId) VALUES(?,?,?,?,?,?,?,?,?,?,?)",("job-a","request-a","style","codex","completed","{}",canonical({"explanation":"private"}),"",timestamp(),timestamp(),pairing["deviceId"]))
+    assert client.get("/v1/jobs/job-a",headers=headers).json()["id"]=="job-a"
+    code=client.post("/admin/pair",headers=admin,json={"url":"https://wardrobe.example.ts.net"}).json()["pairing"]["code"]
+    other=client.post("/v1/pair",json={"code":code,"deviceName":"Second phone"}).json()
+    other_headers={"Authorization":"Bearer "+other["token"]}
+    assert client.get("/v1/jobs/job-a",headers=other_headers).status_code==404
+    assert client.post("/v1/jobs/job-a/cancel",headers=other_headers).status_code==404
+    assert all(j["id"]!="job-a" for j in client.post("/v1/sync",headers=other_headers,json={}).json()["jobs"])
+    assert any(j["id"]=="job-a" for j in client.post("/v1/sync",headers=headers,json={}).json()["jobs"])
+
+def test_phone_can_save_a_key_without_exposing_it(pc,fake_protector):
+    client,app,_,headers,_=pc
+    secret="phone-placeholder-key"
+    response=client.put("/v1/providers/openai",headers=headers,json={"enabled":True,"apiKey":secret,"freeOnly":False,"monthlyBudget":5,"allowPhotos":True})
+    assert response.status_code==200
+    caps=response.json()
+    assert caps["hasKey"] and secret not in response.text
+    row=app.state.store.query("SELECT config,secret FROM providers WHERE id='openai'")[0]
+    assert secret not in row["secret"] and secret not in row["config"]
+    assert caps["config"]["backgroundAnalysis"] is False
+    listing=client.get("/v1/providers",headers=headers)
+    assert listing.status_code==200 and secret not in listing.text
+    assert {p["id"] for p in listing.json()["providers"]}=={"gemini","openai","codex","claude"}
+    assert client.put("/v1/providers/codex",headers=headers,json={"enabled":True}).status_code==403
+
+def test_phone_connection_check_is_rate_limited(pc,monkeypatch):
+    client,app,_,headers,_=pc
+    monkeypatch.setattr(app.state.providers,"test",lambda id_:{"id":id_})
+    for _ in range(6):
+        assert client.post("/v1/providers/gemini/test",headers=headers).status_code==200
+    assert client.post("/v1/providers/gemini/test",headers=headers).status_code==429
+
+def test_analysis_uses_saved_background_free_cutout(store,monkeypatch,fake_protector):
+    from wardrobe import providers as module
+    from wardrobe.images import save_image
+    photo=io.BytesIO();Image.new("RGB",(64,64),"white").save(photo,"JPEG")
+    cutout=io.BytesIO();Image.new("RGBA",(32,32),(0,0,255,255)).save(cutout,"PNG")
+    photo_id=save_image(store,photo.getvalue());cutout_id=save_image(store,cutout.getvalue())
+    item=garment("t","top",imageIds=[photo_id],cutoutId=cutout_id)
+    store.sync(SyncRequest(changes=[change(item)]))
+    providers=Providers(store)
+    providers.configure("openai",ProviderConfig(enabled=True,apiKey="placeholder",freeOnly=False,monthlyBudget=5,allowPhotos=True))
+    providers.update("openai",authenticated=True)
+    seen=[]
+    def post(url,**kwargs):
+        seen.append((url,kwargs))
+        result={"category":"top","color":"#0000ff","shape":"compact","confidence":.6,"styleTags":["casual"]}
+        return __import__("httpx").Response(200,json={"output":[{"content":[{"type":"output_text","text":canonical(result)}]}]})
+    monkeypatch.setattr(module.httpx,"post",post)
+    output=providers.run(JobRequest(kind="analysis",provider="openai",garmentId="t",revision=1,consentPhotos=True,requestId="background-free"),"background-free")
+    assert output["backgroundExcluded"] is True and output["shape"]=="compact"
+    content=seen[0][1]["json"]["input"][0]["content"]
+    image=next(part for part in content if part.get("type")=="input_image")
+    with Image.open(io.BytesIO(base64.b64decode(image["image_url"].split(",",1)[1]))) as sent:
+        red,green,blue=sent.getpixel((sent.width//2,sent.height//2))
+    assert red<25 and green<25 and blue>230
