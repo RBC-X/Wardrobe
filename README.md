@@ -1,6 +1,6 @@
 # Wardrobe — your private Android wardrobe
 
-Current delivery: **1.0.1**, signed Android versionCode **2**. The release preserves the existing signing identity and database format.
+Current delivery: **1.0.1**, signed Android versionCode **2**. The release preserves the existing signing identity and database format. A separate debug-signed weather-first preview is available as a prerelease; it cannot be installed over the signed 1.0.1 app.
 
 Wardrobe is a personal Android 10+ app with an optional Windows companion. Matching, manual editing, photo colour extraction, today's weather, preferences and actual-photo outfit boards work on the phone. AI features start locked; add your own OpenAI or Gemini key or connect your ChatGPT plan in the app, and clothing analysis and styling advice run on the phone, with credentials encrypted by the Android keystore. The PC is optional — pair it for sync and try-on previews; automatic framing, product import, styling advice and clothing analysis run on the phone. The download includes the 4.6 MB detection model, so detection works offline.
 
@@ -11,7 +11,7 @@ Wardrobe is a personal Android 10+ app with an optional Windows companion. Match
 3. Add at least a top, bottom (or a one-piece garment), and shoes. Camera access is optional; use Import photo or manual fields if denied.
 4. Take or import a photo. The phone finds the garment with the bundled model and frames the photo automatically — adjust only if an edge is cut off. No PC or key is involved. Correct the colors/category and save; other angles or labels can be added as extra photos. The original gallery photo is unchanged, and the crop is copied into private app storage.
 5. Open the saved item and tap **Detect clothing**. The bundled U²-Net model runs on the phone: it removes the background, trims the photo to the garment, reads type, main colours and silhouette, and shows a review. It is free, private and needs no PC or key; if the model cannot load, a paired PC can run the same detection. Change any field you disagree with before applying; corrections are protected from later analysis. **AI analysis** and **styling advice** run on the phone with your own provider key or ChatGPT plan, no PC involved.
-6. Today offers Timeless, Balanced (default), or Trend-focused modes, occasion/weather/season controls, and up to five combinations. Add your city under Weather once: the phone fetches a keyless Open-Meteo forecast, sets warm, mild or cold from the perceived temperature, and ranks outfits for it. Build around an item, swap pieces, save, give feedback, or export an outfit board.
+6. Today opens with today's weather, then up to three looks ranked for the day; the highest-scoring look is first and marked **★ Recommended**. On first launch, allow approximate location for the forecast or enter a city. Timeless, Balanced (default), or Trend-focused modes and occasion/weather/season controls are under Today's edit. The phone fetches a keyless Open-Meteo forecast and sets warm, mild or cold from the perceived temperature. Build around an item, swap pieces, save, give feedback, or export an outfit board.
 
 Brand resemblance is not identification. Appearance-derived texture is not verified fabric composition. Only mark brand/composition confirmed after checking a label or exact product.
 

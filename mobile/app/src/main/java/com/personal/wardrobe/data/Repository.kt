@@ -24,7 +24,7 @@ data class ProviderCapability(val id:String="",val enabled:Boolean=false,val aut
 data class Job(val id:String="",val kind:String="",val provider:String="",val status:String="",val result:JsonObject?=null,val error:String="",val createdAt:String="",val updatedAt:String="")
 
 class Repository(val context:Context){
-    val gson=Gson();val connection=Connection(context);val api=ApiClient(connection);val photos=Photos(context);val secrets=Secrets(context);val phoneAi=PhoneAi(secrets);val chatGpt=ChatGpt(context,secrets);val onDevice=OnDevice(context,photos);private val weatherClient=WeatherClient();val productImport=ProductImport(photos)
+    val gson=Gson();val connection=Connection(context);val api=ApiClient(connection);val photos=Photos(context);val secrets=Secrets(context);val phoneAi=PhoneAi(secrets);val chatGpt=ChatGpt(context,secrets);val onDevice=OnDevice(context,photos);private val weatherClient=WeatherClient();val location=DeviceLocation(context);val productImport=ProductImport(photos)
     val database=Room.databaseBuilder(context,WardrobeDatabase::class.java,"wardrobe.db").build()
     val dao=database.dao();private val syncMutex=Mutex()
     val snapshot=dao.observeRecords().map{rows->WardrobeSnapshot(rows.filter{it.kind=="garment"&&!it.deleted}.map{gson.fromJson(it.payload,Garment::class.java)},rows.firstOrNull{it.kind=="profile"&&!it.deleted}?.let{gson.fromJson(it.payload,Profile::class.java)}?:Profile(),rows.filter{it.kind=="outfit"&&!it.deleted}.map{gson.fromJson(it.payload,Outfit::class.java)})}
@@ -33,8 +33,30 @@ class Repository(val context:Context){
     suspend fun trends():List<Trend> = dao.cache("trends")?.let{gson.fromJson(it,object:TypeToken<List<Trend>>(){}.type)}?:emptyList()
     suspend fun weather():WeatherNow?=dao.cache("weather")?.let{runCatching{gson.fromJson(it,WeatherNow::class.java)}.getOrNull()}
     suspend fun weatherPlace():String=dao.cache("weatherPlace")?:""
+    suspend fun weatherCoordinates():Pair<Double,Double>?{
+        val latitude=dao.cache("weatherLat")?.toDoubleOrNull()?:return null
+        val longitude=dao.cache("weatherLon")?.toDoubleOrNull()?:return null
+        return latitude to longitude
+    }
+    private suspend fun cacheWeather(result:WeatherNow){dao.cache(CacheEntity("weather",gson.toJson(result)))}
     /** Keyless and phone-only, so outfit ranking still works while the PC is asleep. */
-    suspend fun refreshWeather(place:String):WeatherNow=withContext(Dispatchers.IO){val result=weatherClient.forecast(place);dao.cache(CacheEntity("weather",gson.toJson(result)));dao.cache(CacheEntity("weatherPlace",place.trim()));result}
+    suspend fun refreshWeather(place:String):WeatherNow=withContext(Dispatchers.IO){
+        val result=weatherClient.forecast(place)
+        cacheWeather(result)
+        dao.cache(CacheEntity("weatherPlace",result.place))
+        dao.cache(CacheEntity("weatherLat",""))
+        dao.cache(CacheEntity("weatherLon",""))
+        result
+    }
+    /** A location forecast stores coordinates so the next launch can refresh without asking again. */
+    suspend fun refreshWeather(latitude:Double,longitude:Double,place:String):WeatherNow=withContext(Dispatchers.IO){
+        val result=weatherClient.forecast(latitude,longitude,place)
+        cacheWeather(result)
+        dao.cache(CacheEntity("weatherPlace",result.place))
+        dao.cache(CacheEntity("weatherLat",latitude.toString()))
+        dao.cache(CacheEntity("weatherLon",longitude.toString()))
+        result
+    }
     suspend fun analyzeOnPhone(item:Garment,provider:String):JsonObject {
         require(item.imageIds.isNotEmpty()){"Add a photo first"}
         val cutout=item.cutoutId.takeIf{it.isNotEmpty()}?.let{runCatching{photos.file(it)}.getOrNull()}

@@ -15,14 +15,27 @@ import java.util.UUID
 
 data class ReviewState(val item:Garment,val suggestion:Garment,val cutoutId:String="",val confidence:Double=0.0,val backgroundExcluded:Boolean=false,val source:String="detect")
 
+private val OpenGreetings=listOf(
+    "What do we plan on wearing today?",
+    "Let's start with the weather.",
+    "What feels right for today?",
+    "A good day begins with a good outfit.",
+    "Let's make getting dressed the easy part.",
+    "Your wardrobe, ready for today.",
+    "What are we wearing today?",
+    "Let's find your look for today.",
+    "A small edit for a better morning.",
+    "Dress for the day ahead.",
+)
+
 class WardrobeViewModel(val repository:Repository):ViewModel(){
     val snapshot=repository.snapshot.stateIn(viewModelScope,SharingStarted.WhileSubscribed(5000),WardrobeSnapshot())
     val busy=MutableStateFlow(false);val message=MutableStateFlow("");val capabilities=MutableStateFlow<List<ProviderCapability>>(emptyList());val jobs=MutableStateFlow<List<Job>>(emptyList())
     val draft=MutableStateFlow<Garment?>(null);val profileDraft=MutableStateFlow<Profile?>(null);val generated=MutableStateFlow<List<Outfit>>(emptyList());val trends=MutableStateFlow<List<Trend>>(emptyList());val feeds=MutableStateFlow(JsonArray());val lastRefresh=MutableStateFlow("Never refreshed")
     val mode=MutableStateFlow("balanced");val occasion=MutableStateFlow("any");val weather=MutableStateFlow("mild");val pinned=MutableStateFlow("");val season=MutableStateFlow("all");val connectionState=MutableStateFlow(if(repository.connection.paired)"Saved connection · refresh to check" else "Not paired")
     val productReview=MutableStateFlow<JsonObject?>(null);val review=MutableStateFlow<ReviewState?>(null);val preview=MutableStateFlow<String?>(null);val collage=MutableStateFlow<File?>(null);val searchProducts=MutableStateFlow(JsonArray())
-    val providerList=MutableStateFlow<List<ProviderCapability>>(emptyList());val checking=MutableStateFlow("");val phoneProviders=MutableStateFlow<List<ProviderCapability>>(emptyList());val weatherNow=MutableStateFlow<WeatherNow?>(null);val weatherPlace=MutableStateFlow("")
-    val advice=MutableStateFlow("")
+    val providerList=MutableStateFlow<List<ProviderCapability>>(emptyList());val checking=MutableStateFlow("");val phoneProviders=MutableStateFlow<List<ProviderCapability>>(emptyList());val weatherNow=MutableStateFlow<WeatherNow?>(null);val weatherPlace=MutableStateFlow("");val locating=MutableStateFlow(false);val weatherReady=MutableStateFlow(false)
+    val greeting=MutableStateFlow(OpenGreetings.random());val advice=MutableStateFlow("")
     var engine=StylingEngine(repository.assetRules());private var polling: kotlinx.coroutines.Job?=null
     init{viewModelScope.launch{reloadCache()};viewModelScope.launch{loadProvidersSilently()};viewModelScope.launch{primeWeather()};viewModelScope.launch{combine(combine(snapshot,mode,occasion,weather,pinned){data,mode,occasion,weather,pinned->arrayOf(data,mode,occasion,weather,pinned)},season){values,season->values+season}.collectLatest{values->val data=values[0] as WardrobeSnapshot;generated.value=withContext(Dispatchers.Default){engine.generate(data.garments,data.profile,trends.value,values[1] as String,values[2] as String,values[3] as String,values[4] as String,season=values[5] as String)}}}}
     private suspend fun reloadCache(){engine=StylingEngine(repository.rules());trends.value=repository.trends();feeds.value=repository.feeds();jobs.value=repository.cachedJobs();lastRefresh.value=repository.lastRefresh();regenerate()}
@@ -41,8 +54,36 @@ class WardrobeViewModel(val repository:Repository):ViewModel(){
         runCatching{mergeProviders(repository.providers(),local)}.onSuccess{providerList.value=it;capabilities.value=it}
     }
     private suspend fun reloadPhoneProviders(){phoneProviders.value=withContext(Dispatchers.IO){repository.localProviders()}}
-    private suspend fun primeWeather(){val place=repository.weatherPlace();weatherPlace.value=place;repository.weather()?.let{weatherNow.value=it;weather.value=it.band};if(place.isBlank())return;runCatching{repository.refreshWeather(place)}.getOrNull()?.let{weatherNow.value=it;weather.value=it.band}}
-    fun loadWeather(place:String){action{val result=repository.refreshWeather(place);weatherNow.value=result;weatherPlace.value=place.trim();weather.value=result.band;message.value="Ranked for ${result.band} weather · ${result.line}"}}
+    private suspend fun primeWeather(){
+        try{
+            val place=repository.weatherPlace();weatherPlace.value=place
+            repository.weather()?.let{weatherNow.value=it;weather.value=it.band}
+            val coordinates=repository.weatherCoordinates()
+            val refreshed=when{
+                coordinates!=null->runCatching{repository.refreshWeather(coordinates.first,coordinates.second,place.ifBlank{"Current location"})}.getOrNull()
+                place.isNotBlank()->runCatching{repository.refreshWeather(place)}.getOrNull()
+                else->null
+            }
+            refreshed?.let{weatherNow.value=it;weatherPlace.value=it.place;weather.value=it.band}
+        }finally{weatherReady.value=true}
+    }
+    fun loadWeather(place:String){action{val result=repository.refreshWeather(place);weatherNow.value=result;weatherPlace.value=result.place;weather.value=result.band;message.value="Ranked for ${result.band} weather · ${result.line}"}}
+    fun loadCurrentWeather(){
+        if(locating.value)return
+        viewModelScope.launch{
+            locating.value=true
+            try{
+                val fix=withContext(Dispatchers.IO){repository.location.current()}
+                val result=repository.refreshWeather(fix.latitude,fix.longitude,fix.place)
+                weatherNow.value=result;weatherPlace.value=result.place;weather.value=result.band
+                message.value="Forecast updated for ${result.place}"
+            }catch(error:Exception){
+                if(error is CancellationException)throw error
+                message.value=error.message?:"Weather could not be loaded. Enter a city instead."
+            }finally{locating.value=false}
+        }
+    }
+    fun refreshGreeting(){val choices=OpenGreetings.filter{it!=greeting.value};greeting.value=choices.randomOrNull()?:OpenGreetings.random()}
     private fun regenerate(){val data=snapshot.value;viewModelScope.launch{generated.value=withContext(Dispatchers.Default){engine.generate(data.garments,data.profile,trends.value,mode.value,occasion.value,weather.value,pinned.value,season=season.value)}}}
     fun action(block:suspend()->Unit){if(busy.value)return;viewModelScope.launch{busy.value=true;try{block()}catch(error:Exception){if(error is CancellationException)throw error;message.value=error.message?:"This action could not be completed"}finally{busy.value=false}}}
     fun edit(garment:Garment){draft.value=garment}

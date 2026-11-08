@@ -1,14 +1,27 @@
 package com.personal.wardrobe.ui
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -17,14 +30,21 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.google.gson.*
@@ -37,6 +57,8 @@ import java.io.File
 import kotlin.math.roundToInt
 
 private data class AiChoice(val kind:String,val outfit:Outfit?=null,val garment:Garment?=null,val gap:Gap?=null)
+private const val LOCATION_INTRO_KEY="location-intro-seen"
+private fun hasLocationPermission(context:Context):Boolean=context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED||context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)==PackageManager.PERMISSION_GRANTED
 
 @Composable fun WardrobeApp(vm:WardrobeViewModel){
     val data by vm.snapshot.collectAsStateWithLifecycle();val busy by vm.busy.collectAsStateWithLifecycle();val message by vm.message.collectAsStateWithLifecycle()
@@ -45,6 +67,35 @@ private data class AiChoice(val kind:String,val outfit:Outfit?=null,val garment:
     val collage by vm.collage.collectAsStateWithLifecycle();val preview by vm.preview.collectAsStateWithLifecycle();val advice by vm.advice.collectAsStateWithLifecycle()
     val providers by vm.capabilities.collectAsStateWithLifecycle();val phoneProviders by vm.phoneProviders.collectAsStateWithLifecycle()
     val context=LocalContext.current;val scope=rememberCoroutineScope();val snackbar=remember{SnackbarHostState()}
+    val prefs=remember{context.getSharedPreferences("wardrobe-ui",0)}
+    var locationGranted by remember{mutableStateOf(hasLocationPermission(context))}
+    var showLocationIntro by remember{mutableStateOf(!locationGranted&&!prefs.getBoolean(LOCATION_INTRO_KEY,false))}
+    val weatherReady by vm.weatherReady.collectAsStateWithLifecycle()
+    val locationRequest=rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()){result->
+        prefs.edit().putBoolean(LOCATION_INTRO_KEY,true).apply()
+        val granted=result[Manifest.permission.ACCESS_FINE_LOCATION]==true||result[Manifest.permission.ACCESS_COARSE_LOCATION]==true
+        locationGranted=granted
+        if(granted)vm.loadCurrentWeather() else vm.message.value="Location is off. Enter a city for your forecast."
+    }
+    val lifecycleOwner=LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner){
+        val observer=LifecycleEventObserver{_,event->if(event==Lifecycle.Event.ON_RESUME)locationGranted=hasLocationPermission(context)}
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose{lifecycleOwner.lifecycle.removeObserver(observer)}
+    }
+    LaunchedEffect(Unit){vm.refreshGreeting()}
+    LaunchedEffect(locationGranted,weatherReady,showLocationIntro){
+        if(locationGranted&&weatherReady&&!showLocationIntro&&vm.weatherPlace.value.isBlank())vm.loadCurrentWeather()
+    }
+    fun requestLocation(){
+        prefs.edit().putBoolean(LOCATION_INTRO_KEY,true).apply()
+        showLocationIntro=false
+        if(locationGranted)vm.loadCurrentWeather() else locationRequest.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION,Manifest.permission.ACCESS_COARSE_LOCATION))
+    }
+    fun skipLocation(){
+        prefs.edit().putBoolean(LOCATION_INTRO_KEY,true).apply()
+        showLocationIntro=false
+    }
     var page by remember{mutableIntStateOf(0)};var camera by remember{mutableStateOf("")};var targetReference by remember{mutableStateOf(false)}
     var crop by remember{mutableStateOf<Bitmap?>(null)};var ai by remember{mutableStateOf<AiChoice?>(null)};var restoreUri by remember{mutableStateOf<Uri?>(null)}
     fun readPhoto(uri:Uri){scope.launch{try{crop=withContext(Dispatchers.IO){vm.repository.photos.read(uri)}}catch(error:Exception){vm.message.value=error.message?:"Photo unavailable"}}}
@@ -53,20 +104,29 @@ private data class AiChoice(val kind:String,val outfit:Outfit?=null,val garment:
     val restore=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){restoreUri=it}
     val exportImage=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")){uri->if(uri!=null){val file=collage?:preview?.let{vm.repository.photos.file(it)};if(file!=null)vm.action{withContext(Dispatchers.IO){context.contentResolver.openOutputStream(uri)?.use{out->file.inputStream().use{it.copyTo(out)}}?:error("Could not export image")};vm.message.value="Image exported"}}}
     LaunchedEffect(message){if(message.isNotBlank()){snackbar.showSnackbar(message);if(vm.message.value==message)vm.message.value=""}}
-    Scaffold(snackbarHost={SnackbarHost(snackbar)},bottomBar={
-        NavigationBar {
-            listOf("Today","Wardrobe","Outfits","Discover","Connect").forEachIndexed { index,title ->
-                NavigationBarItem(selected=page==index,onClick={page=index},icon={Icon(listOf(Icons.Outlined.Home,Icons.AutoMirrored.Outlined.List,Icons.Outlined.FavoriteBorder,Icons.Outlined.ShoppingCart,Icons.Outlined.Settings)[index],title)},label={Text(title)})
-            }
-        }
-    }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)){if(busy)LinearProgressIndicator(Modifier.fillMaxWidth())
-            when(page){
-                0->TodayScreen(vm,data,{ai=it},{vm.profileDraft.value=data.profile},{page=1;vm.newItem()})
-                1->WardrobeScreen(vm,data)
-                2->OutfitsScreen(vm,data){ai=it}
-                3->RecommendationsScreen(vm,data){ai=it}
-                else->ConnectionsScreen(vm,{camera="pair"},{backup.launch("Wardrobe-backup.zip")},{restore.launch(arrayOf("application/zip","application/octet-stream"))})
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.background,MaterialTheme.colorScheme.surfaceContainerLow)))){
+        Scaffold(containerColor=Color.Transparent,snackbarHost={SnackbarHost(snackbar)},bottomBar={WardrobeNavigationBar(page){page=it}}) { padding ->
+            Column(Modifier.fillMaxSize().padding(padding)){
+                if(busy)LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp),color=MaterialTheme.colorScheme.secondary,trackColor=MaterialTheme.colorScheme.secondary.copy(alpha=.14f))
+                AnimatedContent(
+                    targetState=page,
+                    modifier=Modifier.fillMaxSize(),
+                    transitionSpec={
+                        val forward=targetState>initialState
+                        val enter=slideInHorizontally(animationSpec=spring(dampingRatio=1f,stiffness=Spring.StiffnessMediumLow)){width->if(forward)width/10 else -width/10}+fadeIn(tween(190))
+                        val exit=slideOutHorizontally(animationSpec=tween(170)){width->if(forward)-width/14 else width/14}+fadeOut(tween(130))
+                        enter togetherWith exit
+                    },
+                    label="main navigation",
+                ){current->
+                    when(current){
+                        0->TodayScreen(vm,data,{ai=it},{vm.profileDraft.value=data.profile},{page=1;vm.newItem()},locationGranted,{requestLocation()})
+                        1->WardrobeScreen(vm,data)
+                        2->OutfitsScreen(vm,data){ai=it}
+                        3->RecommendationsScreen(vm,data){ai=it}
+                        else->ConnectionsScreen(vm,{camera="pair"},{backup.launch("Wardrobe-backup.zip")},{restore.launch(arrayOf("application/zip","application/octet-stream"))})
+                    }
+                }
             }
         }
     }
@@ -80,59 +140,250 @@ private data class AiChoice(val kind:String,val outfit:Outfit?=null,val garment:
     productReview?.let{ProductReview(vm,it)}
     review?.let{state->ReviewSheet(vm,state)}
     val shownImage:Any?=collage?:preview?.let{vm.repository.photos.file(it)}
-    if(shownImage!=null)Dialog({vm.collage.value=null;vm.preview.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize()){Column(Modifier.systemBarsPadding().padding(20.dp),verticalArrangement=Arrangement.spacedBy(16.dp)){Text(if(collage!=null)"Your outfit board"else"Approximate try-on",style=MaterialTheme.typography.headlineSmall);if(preview!=null)Text("Generated visualization. Fit, proportions, colors, and small details can differ from the real clothes.");AsyncImage(shownImage,"Outfit preview",Modifier.fillMaxWidth().weight(1f),contentScale=ContentScale.Fit);Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){OutlinedButton({vm.collage.value=null;vm.preview.value=null},Modifier.weight(1f)){Text("Close")};Button({exportImage.launch("Wardrobe-outfit.jpg")},Modifier.weight(1f)){Text("Export")}}}}}
+    if(shownImage!=null)Dialog({vm.collage.value=null;vm.preview.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize(),color=MaterialTheme.colorScheme.background){Column(Modifier.systemBarsPadding().padding(20.dp),verticalArrangement=Arrangement.spacedBy(16.dp)){Text(if(collage!=null)"Your outfit board"else"Approximate try-on",style=MaterialTheme.typography.headlineSmall);if(preview!=null)Text("Generated visualization. Fit, proportions, colors, and small details can differ from the real clothes.");AsyncImage(shownImage,"Outfit preview",Modifier.fillMaxWidth().weight(1f),contentScale=ContentScale.Fit);Row(horizontalArrangement=Arrangement.spacedBy(12.dp)){OutlinedButton({vm.collage.value=null;vm.preview.value=null},Modifier.weight(1f)){Text("Close")};Button({exportImage.launch("Wardrobe-outfit.jpg")},Modifier.weight(1f)){Text("Export")}}}}}
     if(advice.isNotEmpty())AlertDialog(onDismissRequest={vm.advice.value=""},title={Text("Styling advice")},text={Text(advice,Modifier.verticalScroll(rememberScrollState()))},confirmButton={TextButton({vm.advice.value=""}){Text("Done")}})
     restoreUri?.let{uri->AlertDialog(onDismissRequest={restoreUri=null},title={Text("Restore your wardrobe?")},text={Text("Matching records in this backup replace the saved versions. Other current items remain. Connection credentials are excluded.")},confirmButton={Button({vm.restore(uri);restoreUri=null}){Text("Restore")}},dismissButton={TextButton({restoreUri=null}){Text("Cancel")}})}
+    if(showLocationIntro)LocationIntroDialog({requestLocation()},{skipLocation()})
 }
 
-@Composable private fun Header(title:String,subtitle:String,action:(@Composable ()->Unit)?=null){Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(title,style=MaterialTheme.typography.headlineLarge);Text(subtitle,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)};action?.invoke()}}
-@Composable private fun Note(title:String,text:String){Card(colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainer)){Column(Modifier.fillMaxWidth().padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){Text(title,style=MaterialTheme.typography.titleMedium);Text(text)}}}
-@Composable private fun Select(label:String,value:String,options:List<String>,onSelect:(String)->Unit){var open by remember{mutableStateOf(false)};Box{OutlinedButton({open=true},Modifier.fillMaxWidth()){Text("$label · ${value.replaceFirstChar{it.uppercase()}}",Modifier.weight(1f));Icon(Icons.Outlined.ArrowDropDown,null)};DropdownMenu(open,{open=false}){options.forEach{option->DropdownMenuItem(text={Text(option.replaceFirstChar{it.uppercase()})},onClick={onSelect(option);open=false})}}}}
-@Composable private fun Field(label:String,value:String,onChange:(String)->Unit,help:String="",singleLine:Boolean=true){OutlinedTextField(value,onChange,Modifier.fillMaxWidth(),label={Text(label)},singleLine=singleLine,supportingText=if(help.isNotEmpty()){{Text(help)}}else null)}
-@OptIn(ExperimentalLayoutApi::class) @Composable private fun Tags(options:List<String>,selected:List<String>,onChange:(List<String>)->Unit){FlowRow(horizontalArrangement=Arrangement.spacedBy(7.dp)){options.forEach{tag->FilterChip(tag in selected,{onChange(if(tag in selected)selected-tag else selected+tag)},label={Text(tag)})}}}
-@Composable private fun Check(label:String,value:Boolean,onChange:(Boolean)->Unit){Row(Modifier.fillMaxWidth().clickable{onChange(!value)},verticalAlignment=Alignment.CenterVertically){Checkbox(value,onChange);Text(label,Modifier.weight(1f))}}
-@Composable private fun GarmentImage(vm:WardrobeViewModel,item:Garment,modifier:Modifier=Modifier){val id=item.cutoutId.ifEmpty{item.imageIds.firstOrNull().orEmpty()};Box(modifier.background(MaterialTheme.colorScheme.surfaceContainerLow),contentAlignment=Alignment.Center){if(id.isNotEmpty())AsyncImage(vm.repository.photos.file(id),item.name,Modifier.fillMaxSize().padding(8.dp),contentScale=ContentScale.Fit)else{Column(horizontalAlignment=Alignment.CenterHorizontally){Icon(Icons.AutoMirrored.Outlined.List,null,Modifier.size(38.dp),tint=runCatching{Color(android.graphics.Color.parseColor(item.color))}.getOrDefault(Color.Gray));Text("Add a photo",style=MaterialTheme.typography.bodySmall)}}}}
-@Composable private fun Link(label:String,url:String){val context=LocalContext.current;TextButton({runCatching{val uri=Uri.parse(url);require(uri.scheme=="https");context.startActivity(Intent(Intent.ACTION_VIEW,uri))}}){Text(label)}}
+@Composable private fun WardrobeNavigationBar(page:Int,onPage:(Int)->Unit){
+    val items=listOf(
+        "Today" to Icons.Outlined.Home,
+        "Wardrobe" to Icons.AutoMirrored.Outlined.List,
+        "Outfits" to Icons.Outlined.FavoriteBorder,
+        "Discover" to Icons.Outlined.Search,
+        "Connect" to Icons.Outlined.Settings,
+    )
+    Surface(
+        color=MaterialTheme.colorScheme.surface.copy(alpha=.97f),
+        shape=RoundedCornerShape(topStart=28.dp,topEnd=28.dp),
+        shadowElevation=14.dp,
+        border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant.copy(alpha=.55f)),
+    ){
+        NavigationBar(containerColor=Color.Transparent,tonalElevation=0.dp){
+            items.forEachIndexed{index,(title,icon)->
+                NavigationBarItem(
+                    selected=page==index,
+                    onClick={onPage(index)},
+                    icon={Icon(icon,title,Modifier.size(22.dp))},
+                    label={Text(title,style=MaterialTheme.typography.labelSmall,maxLines=1,overflow=TextOverflow.Ellipsis)},
+                    colors=NavigationBarItemDefaults.colors(
+                        selectedIconColor=MaterialTheme.colorScheme.onPrimaryContainer,
+                        selectedTextColor=MaterialTheme.colorScheme.primary,
+                        indicatorColor=MaterialTheme.colorScheme.primaryContainer,
+                        unselectedIconColor=MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=.78f),
+                        unselectedTextColor=MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=.78f),
+                    ),
+                )
+            }
+        }
+    }
+}
 
-@Composable private fun WeatherCard(vm:WardrobeViewModel,now:WeatherNow?){
-    val saved by vm.weatherPlace.collectAsStateWithLifecycle()
-    var place by remember{mutableStateOf(saved)}
-    LaunchedEffect(saved){if(saved.isNotBlank()&&place.isBlank())place=saved}
-    Card(colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainer)){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
-        Text("Weather",style=MaterialTheme.typography.titleMedium)
-        Text(now?.line?:"Add your city once. Today's forecast sets warm, mild or cold and the outfits below are ranked for it. No account or key needed.",style=MaterialTheme.typography.bodyMedium)
-        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically){Box(Modifier.weight(1f)){Field("City",place,{place=it},"Town or city for the forecast")};Button({vm.loadWeather(place)},enabled=place.isNotBlank()){Text("Check")}}
-        Text("Forecast by Open-Meteo. It is a ranking input, not a guarantee of comfort.",style=MaterialTheme.typography.bodySmall)
+@Composable private fun Header(title:String,subtitle:String,action:(@Composable ()->Unit)?=null){
+    Column(Modifier.fillMaxWidth()){
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Column(Modifier.weight(1f)){
+                Text(title,style=MaterialTheme.typography.headlineLarge)
+                Spacer(Modifier.height(5.dp))
+                Text(subtitle,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            action?.invoke()
+        }
+        Spacer(Modifier.height(13.dp))
+        Box(Modifier.width(32.dp).height(3.dp).background(MaterialTheme.colorScheme.secondary,CircleShape))
+    }
+}
+@Composable private fun Note(title:String,text:String){
+    Card(
+        shape=RoundedCornerShape(26.dp),
+        colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLow),
+        border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant.copy(alpha=.55f)),
+        elevation=CardDefaults.cardElevation(defaultElevation=0.dp),
+    ){Column(Modifier.fillMaxWidth().padding(20.dp),verticalArrangement=Arrangement.spacedBy(7.dp)){
+        Text(title,style=MaterialTheme.typography.titleMedium)
+        Text(text,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
     }}
 }
+@Composable private fun Select(label:String,value:String,options:List<String>,onSelect:(String)->Unit){
+    var open by remember{mutableStateOf(false)}
+    Box{
+        Surface(
+            onClick={open=true},
+            shape=RoundedCornerShape(16.dp),
+            color=MaterialTheme.colorScheme.surfaceContainerLowest,
+            contentColor=MaterialTheme.colorScheme.onSurface,
+            border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant.copy(alpha=.7f)),
+        ){
+            Row(Modifier.fillMaxWidth().padding(horizontal=14.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
+                Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(1.dp)){
+                    Text(label.uppercase(),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,letterSpacing=1.sp,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    Text(value.replaceFirstChar{it.uppercase()},style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                }
+                Icon(Icons.Outlined.ArrowDropDown,null,tint=MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        DropdownMenu(open,{open=false}){options.forEach{option->DropdownMenuItem(text={Text(option.replaceFirstChar{it.uppercase()})},onClick={onSelect(option);open=false})}}
+    }
+}
+@Composable private fun Field(label:String,value:String,onChange:(String)->Unit,help:String="",singleLine:Boolean=true){
+    OutlinedTextField(
+        value,onChange,Modifier.fillMaxWidth(),
+        label={Text(label,style=MaterialTheme.typography.labelMedium)},
+        singleLine=singleLine,
+        shape=RoundedCornerShape(16.dp),
+        textStyle=MaterialTheme.typography.bodyLarge,
+        supportingText=if(help.isNotEmpty()){{Text(help)}}else null,
+        colors=OutlinedTextFieldDefaults.colors(
+            focusedBorderColor=MaterialTheme.colorScheme.primary,
+            unfocusedBorderColor=MaterialTheme.colorScheme.outlineVariant.copy(alpha=.8f),
+            focusedContainerColor=MaterialTheme.colorScheme.surfaceContainerLowest,
+            unfocusedContainerColor=MaterialTheme.colorScheme.surfaceContainerLowest,
+            focusedLabelColor=MaterialTheme.colorScheme.primary,
+            unfocusedLabelColor=MaterialTheme.colorScheme.onSurfaceVariant,
+            cursorColor=MaterialTheme.colorScheme.primary,
+        ),
+    )
+}
+@OptIn(ExperimentalLayoutApi::class) @Composable private fun Tags(options:List<String>,selected:List<String>,onChange:(List<String>)->Unit){FlowRow(horizontalArrangement=Arrangement.spacedBy(7.dp)){options.forEach{tag->FilterChip(tag in selected,{onChange(if(tag in selected)selected-tag else selected+tag)},label={Text(tag)})}}}
+@Composable private fun Check(label:String,value:Boolean,onChange:(Boolean)->Unit){Row(Modifier.fillMaxWidth().clickable{onChange(!value)},verticalAlignment=Alignment.CenterVertically){Checkbox(value,onChange);Text(label,Modifier.weight(1f))}}
+@Composable private fun GarmentImage(vm:WardrobeViewModel,item:Garment,modifier:Modifier=Modifier){val id=item.cutoutId.ifEmpty{item.imageIds.firstOrNull().orEmpty()};Box(modifier.clip(RoundedCornerShape(18.dp)).background(MaterialTheme.colorScheme.surfaceContainerLow),contentAlignment=Alignment.Center){if(id.isNotEmpty())AsyncImage(vm.repository.photos.file(id),item.name,Modifier.fillMaxSize().padding(10.dp),contentScale=ContentScale.Fit)else{Column(horizontalAlignment=Alignment.CenterHorizontally){Icon(Icons.AutoMirrored.Outlined.List,null,Modifier.size(38.dp),tint=runCatching{Color(android.graphics.Color.parseColor(item.color))}.getOrDefault(Color.Gray));Text("Add a photo",style=MaterialTheme.typography.bodySmall)}}}}
+@Composable private fun Link(label:String,url:String){val context=LocalContext.current;TextButton({runCatching{val uri=Uri.parse(url);require(uri.scheme=="https");context.startActivity(Intent(Intent.ACTION_VIEW,uri))}}){Text(label)}}
 
-@Composable private fun TodayScreen(vm:WardrobeViewModel,data:WardrobeSnapshot,onAi:(AiChoice)->Unit,onProfile:()->Unit,onAdd:()->Unit){
-    val outfits by vm.generated.collectAsStateWithLifecycle();val mode by vm.mode.collectAsStateWithLifecycle();val occasion by vm.occasion.collectAsStateWithLifecycle();val weather by vm.weather.collectAsStateWithLifecycle();val pinned by vm.pinned.collectAsStateWithLifecycle();val season by vm.season.collectAsStateWithLifecycle();val weatherNow by vm.weatherNow.collectAsStateWithLifecycle()
+@OptIn(ExperimentalLayoutApi::class) @Composable private fun WeatherHero(vm:WardrobeViewModel,now:WeatherNow?,locating:Boolean,hasLocation:Boolean,onUseLocation:()->Unit){
+    val saved by vm.weatherPlace.collectAsStateWithLifecycle()
+    var editCity by remember{mutableStateOf(false)}
+    var city by remember{mutableStateOf("")}
+    fun openCity(){city=if(saved=="Current location") "" else saved;editCity=true}
+    Card(
+        shape=RoundedCornerShape(30.dp),
+        colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLowest),
+        border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant.copy(alpha=.55f)),
+        elevation=CardDefaults.cardElevation(defaultElevation=0.dp),
+    ){Column(Modifier.fillMaxWidth().padding(22.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(2.dp)){
+                Text("TODAY'S WEATHER",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,letterSpacing=1.2.sp)
+                Text(now?.place?.takeIf{it.isNotBlank()}?:"Your local forecast",style=MaterialTheme.typography.titleMedium)
+            }
+            if(locating)CircularProgressIndicator(Modifier.size(18.dp),strokeWidth=2.dp)
+            else if(now!=null)TextButton({openCity()}){Text("Change")}
+        }
+        if(now!=null){
+            Row(verticalAlignment=Alignment.Bottom){
+                Text("${now.temperature.roundToInt()}°",style=MaterialTheme.typography.displayMedium)
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f).padding(bottom=7.dp),verticalArrangement=Arrangement.spacedBy(1.dp)){
+                    Text(now.summary,style=MaterialTheme.typography.headlineSmall)
+                    Text("Feels like ${now.feelsLike.roundToInt()}°",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            FlowRow(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalArrangement=Arrangement.spacedBy(2.dp)){
+                Text("H ${now.high.roundToInt()}°   L ${now.low.roundToInt()}°",style=MaterialTheme.typography.labelLarge)
+                Text("${now.band.replaceFirstChar{it.uppercase()}} edit",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.secondary)
+            }
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(4.dp)){
+                TextButton({openCity()}){Text("Change city")}
+                TextButton(onUseLocation,enabled=!locating){Text("Use my location")}
+            }
+            Text("Forecast by Open-Meteo. Your location is used only to fetch the weather.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        }else{
+            Text("Your forecast sets the weather and warmth for today's looks. Allow location once and get dressed for the day outside.",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            if(locating){
+                Row(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalAlignment=Alignment.CenterVertically){CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp);Text("Finding your local forecast…",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}
+            }else{
+                Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)){
+                    Button(onUseLocation,Modifier.weight(1f)){Text(if(hasLocation)"Update weather" else "Use my location")}
+                    OutlinedButton({openCity()},Modifier.weight(1f)){Text("Enter a city")}
+                }
+                if(!hasLocation)Text("Location is off. A city works just as well.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }}
+    if(editCity)AlertDialog(
+        onDismissRequest={editCity=false},
+        title={Text("Weather city")},
+        text={Column(verticalArrangement=Arrangement.spacedBy(10.dp)){Text("Use a town or city when you prefer not to share your location.",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant);Field("City",city,{city=it},"Town or city for the forecast")}},
+        confirmButton={Button({val value=city.trim();if(value.isNotBlank()){editCity=false;vm.loadWeather(value)}},enabled=city.isNotBlank()){Text("Update weather")}},
+        dismissButton={TextButton({editCity=false}){Text("Cancel")}},
+    )
+}
+
+@Composable private fun LocationIntroDialog(onAllow:()->Unit,onSkip:()->Unit){
+    AlertDialog(
+        onDismissRequest=onSkip,
+        title={Text("Weather where you are")},
+        text={Column(verticalArrangement=Arrangement.spacedBy(12.dp)){
+            Text("Wardrobe can use your approximate location to fetch today's forecast and choose the right warmth for your looks.",style=MaterialTheme.typography.bodyMedium)
+            Text("Your coordinates go to Open-Meteo only for the forecast and are cached on this phone to refresh it. They are not added to your wardrobe, sent to AI, or shared with your PC.",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        }},
+        confirmButton={Button(onAllow){Text("Use my location")}},
+        dismissButton={TextButton(onSkip){Text("Not now")}},
+    )
+}
+
+@Composable private fun TodayScreen(vm:WardrobeViewModel,data:WardrobeSnapshot,onAi:(AiChoice)->Unit,onProfile:()->Unit,onAdd:()->Unit,hasLocation:Boolean,onUseLocation:()->Unit){
+    val outfits by vm.generated.collectAsStateWithLifecycle();val mode by vm.mode.collectAsStateWithLifecycle();val occasion by vm.occasion.collectAsStateWithLifecycle();val weather by vm.weather.collectAsStateWithLifecycle();val pinned by vm.pinned.collectAsStateWithLifecycle();val season by vm.season.collectAsStateWithLifecycle();val weatherNow by vm.weatherNow.collectAsStateWithLifecycle();val greeting by vm.greeting.collectAsStateWithLifecycle();val locating by vm.locating.collectAsStateWithLifecycle()
+    val topOutfits=outfits.sortedByDescending{it.score}.take(3)
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(16.dp)){
-        item{Header("Wear it well","Outfits from the clothes you own") {IconButton(onProfile){Icon(Icons.Outlined.Settings,"Your preferences")}}}
-        item{Select("Outfit mode",mode,listOf("timeless","balanced","trend")){vm.mode.value=it};Spacer(Modifier.height(6.dp));Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Box(Modifier.weight(1f)){Select("Occasion",occasion,listOf("any","casual","formal")){vm.occasion.value=it}};Box(Modifier.weight(1f)){Select("Weather",weather,listOf("mild","warm","cold")){vm.weather.value=it}}}}
-        item{WeatherCard(vm,weatherNow)}
-        item{Select("Season",season,listOf("all","spring","summer","autumn","winter")){vm.season.value=it}}
+        item{Header("Wear it well",greeting) {IconButton(onProfile){Icon(Icons.Outlined.Settings,"Your preferences")}}}
+        item{WeatherHero(vm,weatherNow,locating,hasLocation,onUseLocation)}
         if(pinned.isNotEmpty())item{AssistChip({vm.pinned.value=""},label={Text("Around ${data.garments.find{it.id==pinned}?.name?:"an item"} · clear")})}
         if(data.garments.isEmpty())item{Note("A wardrobe that starts with you","Add your own tops, bottoms or one-piece garments, and shoes. Matching works offline with no AI setup.");Spacer(Modifier.height(12.dp));Button(onAdd,Modifier.fillMaxWidth()){Text("Add your first item")}}
-        else if(outfits.isEmpty())item{Note("A few more pieces will help","An outfit needs a top and bottom, or a one-piece garment, plus shoes. Cold weather adds outerwear. Check availability or adjust the occasion.")}
-        items(outfits.size){index->OutfitCard(vm,outfits[index],data,"Option ${index+1}",onAi,true)}
+        else if(outfits.isEmpty())item{Note("Three looks need a few more pieces","An outfit needs a top and bottom, or a one-piece garment, plus shoes. Cold weather adds outerwear. Check availability or adjust the occasion.")}
+        else{
+            item{Column(Modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(4.dp)){
+                Text("Three looks for today",style=MaterialTheme.typography.headlineSmall)
+                val weatherDescription=weatherNow?.let{"today's ${it.band} weather"}?:"today's forecast"
+                Text("Built from your wardrobe and $weatherDescription. The first look is our recommendation.",style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            }}
+            items(topOutfits.size){index->OutfitCard(vm,topOutfits[index],data,"Look ${index+1}",onAi,true,recommended=index==0)}
+        }
+        item{
+            Card(
+                shape=RoundedCornerShape(28.dp),
+                colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLow),
+                border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant.copy(alpha=.55f)),
+                elevation=CardDefaults.cardElevation(defaultElevation=0.dp),
+            ){Column(Modifier.fillMaxWidth().padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
+                Text("TODAY'S EDIT",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.secondary,letterSpacing=1.2.sp)
+                Row(horizontalArrangement=Arrangement.spacedBy(10.dp)){Box(Modifier.weight(1f)){Select("Outfit mode",mode,listOf("timeless","balanced","trend")){vm.mode.value=it}};Box(Modifier.weight(1f)){Select("Season",season,listOf("all","spring","summer","autumn","winter")){vm.season.value=it}}}
+                Row(horizontalArrangement=Arrangement.spacedBy(10.dp)){Box(Modifier.weight(1f)){Select("Occasion",occasion,listOf("any","casual","formal")){vm.occasion.value=it}};Box(Modifier.weight(1f)){Select("Weather",weather,listOf("mild","warm","cold")){vm.weather.value=it}}}
+            }}
+        }
         item{Text(when(mode){"timeless"->"Timeless: 85% styling principles, 15% your preferences.";"trend"->"Trend focused: 60% styling principles, 15% your preferences, 25% supported trends.";else->"Balanced: 75% styling principles, 15% your preferences, 10% supported trends."},style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)}
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class) @Composable private fun OutfitCard(vm:WardrobeViewModel,outfit:Outfit,data:WardrobeSnapshot,title:String,onAi:(AiChoice)->Unit,swappable:Boolean=false){
+@OptIn(ExperimentalLayoutApi::class) @Composable private fun OutfitCard(vm:WardrobeViewModel,outfit:Outfit,data:WardrobeSnapshot,title:String,onAi:(AiChoice)->Unit,swappable:Boolean=false,recommended:Boolean=false){
     val items=outfit.itemIds.mapNotNull{id->data.garments.find{it.id==id}};val valid=items.size==outfit.itemIds.size&&vm.engine.valid(items,outfit.occasion,outfit.weather)
-    Card(shape=RoundedCornerShape(24.dp)){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
-        Row{Text(title,style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f));Text("${outfit.score.toInt()} / 100",fontWeight=FontWeight.Medium)}
+    Card(
+        shape=RoundedCornerShape(28.dp),
+        colors=CardDefaults.cardColors(containerColor=if(recommended)MaterialTheme.colorScheme.surfaceContainerLow else MaterialTheme.colorScheme.surfaceContainerLowest),
+        border=BorderStroke(if(recommended)1.5.dp else 1.dp,if(recommended)MaterialTheme.colorScheme.primary.copy(alpha=.55f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha=.55f)),
+        elevation=CardDefaults.cardElevation(defaultElevation=1.dp),
+    ){Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+        Row(verticalAlignment=Alignment.CenterVertically){
+            Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(2.dp)){
+                Text(title.uppercase(),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.secondary,letterSpacing=1.2.sp,fontWeight=if(recommended)FontWeight.Bold else FontWeight.Medium)
+                Text("${items.size} pieces, composed for you",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Surface(shape=RoundedCornerShape(50),color=MaterialTheme.colorScheme.primary.copy(alpha=.10f),contentColor=MaterialTheme.colorScheme.primary){
+                Text("${outfit.score.toInt()} / 100",Modifier.padding(horizontal=12.dp,vertical=7.dp),style=MaterialTheme.typography.labelLarge)
+            }
+        }
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(6.dp)){items.take(4).forEach{item->Column(Modifier.weight(1f)){GarmentImage(vm,item,Modifier.fillMaxWidth().height(136.dp).clickable{vm.edit(item)});Text(item.name,style=MaterialTheme.typography.labelMedium,maxLines=2);if(swappable)TextButton({vm.swap(outfit,item.id)},contentPadding=PaddingValues(0.dp)){Text("Swap")}}}}
         if(!valid)Text("A piece is missing or unavailable. Edit the wardrobe or save a new combination.",color=MaterialTheme.colorScheme.error)
-        Text(outfit.reasons.joinToString(" "),style=MaterialTheme.typography.bodyMedium)
-        Text("Principles ${outfit.foundation.toInt()} · Preferences ${outfit.personal.toInt()} · Trends ${outfit.trend.toInt()}",style=MaterialTheme.typography.labelSmall)
+        Text(outfit.reasons.joinToString(" "),style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Principles ${outfit.foundation.toInt()} · Preferences ${outfit.personal.toInt()} · Trends ${outfit.trend.toInt()}",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=.8f))
         if(outfit.previewImageId.isNotEmpty())OutlinedButton({vm.preview.value=outfit.previewImageId}){Text("View saved try-on")}
         outfit.trendSources.forEach{source->Text(source["title"]?.toString().orEmpty(),style=MaterialTheme.typography.labelMedium);(source["sources"] as? List<*>)?.filterIsInstance<String>()?.forEach{Link("Trend source",it)}}
         FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp)){Button({vm.showCollage(outfit)},enabled=valid){Text("Outfit board")};OutlinedButton({vm.saveOutfit(outfit)},enabled=valid){Text("Save")};OutlinedButton({onAi(AiChoice("image",outfit=outfit))},enabled=valid){Icon(Icons.Outlined.Star,null,Modifier.size(16.dp));Text(" Try-on")};TextButton({onAi(AiChoice("text",outfit=outfit))},enabled=valid){Text("AI advice")}}
         Row{TextButton({vm.feedback(outfit,true)},enabled=valid){Text("Would wear")};TextButton({vm.feedback(outfit,false)},enabled=valid){Text("Not my style")}}
+        if(recommended)Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment=Alignment.CenterVertically){
+            Text("★",style=MaterialTheme.typography.titleMedium,color=MaterialTheme.colorScheme.secondary)
+            Text("Recommended",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.secondary,fontWeight=FontWeight.SemiBold)
+        }
     }}
 }
 
@@ -140,14 +391,14 @@ private data class AiChoice(val kind:String,val outfit:Outfit?=null,val garment:
     Column(Modifier.fillMaxSize().padding(horizontal=20.dp)){Spacer(Modifier.height(20.dp));Header("Your wardrobe","${data.garments.size} pieces · kept on this phone"){FilledTonalIconButton({vm.newItem()}){Icon(Icons.Outlined.Add,"Add clothing")}};Spacer(Modifier.height(14.dp));Select("Show",filter,listOf("all")+vm.engine.rules.categories){filter=it};Spacer(Modifier.height(14.dp))
         if(items.isEmpty())Note("Make space for your own clothes","Photograph, import, or manually add an item. Your wardrobe begins empty.")
         LazyVerticalGrid(GridCells.Fixed(2),verticalArrangement=Arrangement.spacedBy(12.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),contentPadding=PaddingValues(bottom=20.dp)){
-            items(items,key={it.id}){item->Card(onClick={vm.edit(item)}){GarmentImage(vm,item,Modifier.fillMaxWidth().height(190.dp));Column(Modifier.padding(12.dp)){Text(item.name,style=MaterialTheme.typography.titleSmall);Text("${item.subcategory} · ${item.status}",style=MaterialTheme.typography.bodySmall);Text(if(item.brandConfirmed)item.brand else "Brand unconfirmed",style=MaterialTheme.typography.labelSmall);TextButton({vm.pinned.value=item.id;vm.message.value="Today will build around ${item.name}"},contentPadding=PaddingValues(0.dp)){Text("Build around this")}}}}
+            items(items,key={it.id}){item->Card(onClick={vm.edit(item)},shape=RoundedCornerShape(24.dp),colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLowest),border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant.copy(alpha=.55f)),elevation=CardDefaults.cardElevation(defaultElevation=0.dp)){GarmentImage(vm,item,Modifier.fillMaxWidth().height(190.dp));Column(Modifier.padding(14.dp),verticalArrangement=Arrangement.spacedBy(3.dp)){Text(item.name,style=MaterialTheme.typography.titleSmall,maxLines=2);Text("${item.subcategory} · ${item.status}",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant);Text(if(item.brandConfirmed)item.brand else "Brand unconfirmed",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant);TextButton({vm.pinned.value=item.id;vm.message.value="Today will build around ${item.name}"},contentPadding=PaddingValues(0.dp)){Text("Build around this")}}}}
         }
     }
 }
 
 @OptIn(ExperimentalLayoutApi::class) @Composable private fun Editor(vm:WardrobeViewModel,item:Garment,data:WardrobeSnapshot,onPhoto:(Boolean)->Unit,onAnalysis:(Garment)->Unit,onDetect:(Garment)->Unit){
     var delete by remember{mutableStateOf(false)};val existing=data.garments.find{it.id==item.id};val scope=rememberCoroutineScope()
-    Dialog({vm.draft.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize()){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+    Dialog({vm.draft.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize(),color=MaterialTheme.colorScheme.background){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
         Header(if(existing==null)"Add a piece"else"Edit your piece","Your corrections stay authoritative"){IconButton({vm.draft.value=null}){Icon(Icons.Outlined.Close,"Close")}}
         GarmentImage(vm,item,Modifier.fillMaxWidth().height(250.dp));Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Button({onPhoto(true)},Modifier.weight(1f)){Text("Camera")};OutlinedButton({onPhoto(false)},Modifier.weight(1f)){Text("Import photo")}}
         if(item.imageIds.isNotEmpty())Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)){item.imageIds.forEachIndexed{index,id->Column{AsyncImage(vm.repository.photos.file(id),"Photo ${index+1}",Modifier.size(80.dp),contentScale=ContentScale.Fit);TextButton({vm.change("imageIds"){it.copy(imageIds=it.imageIds-id,cutoutId="")}}){Text("Remove")}}}}
@@ -171,7 +422,7 @@ private data class AiChoice(val kind:String,val outfit:Outfit?=null,val garment:
     if(delete)AlertDialog({delete=false},title={Text("Remove ${item.name}?")},text={Text("It will leave your wardrobe and future outfits.")},confirmButton={Button({vm.remove(item);delete=false}){Text("Remove")}},dismissButton={TextButton({delete=false}){Text("Cancel")}})
 }
 
-@Composable private fun ProfileEditor(vm:WardrobeViewModel,profile:Profile,onPhoto:(Boolean)->Unit){var colorsText by remember{mutableStateOf(profile.favoriteColors.joinToString(", "))};var budgetText by remember{mutableStateOf(if(profile.shoppingBudget==0.0)""else profile.shoppingBudget.toString())};Dialog({vm.profileDraft.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize()){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+@Composable private fun ProfileEditor(vm:WardrobeViewModel,profile:Profile,onPhoto:(Boolean)->Unit){var colorsText by remember{mutableStateOf(profile.favoriteColors.joinToString(", "))};var budgetText by remember{mutableStateOf(if(profile.shoppingBudget==0.0)""else profile.shoppingBudget.toString())};Dialog({vm.profileDraft.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize(),color=MaterialTheme.colorScheme.background){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
     Header("Your style","Preferences shape outfit rankings"){IconButton({vm.profileDraft.value=null}){Icon(Icons.Outlined.Close,"Close")}}
     Text("Preferred styles");Tags(vm.engine.rules.styles,profile.styles){vm.profileDraft.value=profile.copy(styles=it)}
     Field("Favorite colors",colorsText,{colorsText=it;vm.profileDraft.value=profile.copy(favoriteColors=it.split(',').map{v->v.trim()}.filter{v->Regex("#[0-9a-fA-F]{6}").matches(v)})},"Comma-separated hex colors")
@@ -228,7 +479,7 @@ private data class AiChoice(val kind:String,val outfit:Outfit?=null,val garment:
 }
 
 @Composable private fun ProductReview(vm:WardrobeViewModel,result:JsonObject){val products=result["products"]?.asJsonArray?:JsonArray();var selected by remember{mutableIntStateOf(0)};var image by remember{mutableStateOf("")};var confirmed by remember{mutableStateOf(false)}
-    Dialog({vm.productReview.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize()){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+    Dialog({vm.productReview.value=null},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize(),color=MaterialTheme.colorScheme.background){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
         Header("Confirm your product","Choose the exact design, color and image"){IconButton({vm.productReview.value=null}){Icon(Icons.Outlined.Close,"Close")}}
         if(products.size()==0)Text("No product details were retrievable. You can keep the URL and edit the clothing attributes manually.")
         products.forEachIndexed{i,element->val product=element.asJsonObject;Row(Modifier.fillMaxWidth().clickable{selected=i;image="";confirmed=false},verticalAlignment=Alignment.CenterVertically){RadioButton(selected==i,{selected=i;image="";confirmed=false});Column{Text(product.string("name","Product"),style=MaterialTheme.typography.titleMedium);Text("Variant: ${product.string("color","Not provided")} · ${product.string("brand")}")}}}
@@ -272,8 +523,13 @@ private fun chatGptModels(provider:ProviderCapability):List<ChatGptModel> {
     var confirmed by remember(provider){mutableStateOf(provider.config.flag("freeProjectConfirmed"))}
     var budget by remember(provider){mutableStateOf(provider.config.amount("monthlyBudget").takeIf{it>0}?.toInt()?.toString().orEmpty())}
     var key by remember(provider){mutableStateOf("")}
-    Card{Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
-        Text(providerName(provider.id),style=MaterialTheme.typography.titleMedium)
+    Card(
+        shape=RoundedCornerShape(26.dp),
+        colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLowest),
+        border=BorderStroke(1.dp,MaterialTheme.colorScheme.outlineVariant.copy(alpha=.55f)),
+        elevation=CardDefaults.cardElevation(defaultElevation=0.dp),
+    ){Column(Modifier.padding(18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
+        Text(providerName(provider.id),style=MaterialTheme.typography.titleLarge)
         Text(when{chatgpt->if(provider.authenticated)"Signed in on this phone" else "Not connected";local->"Key encrypted on this phone";provider.hasKey->"Key saved on your PC";byKey->"No key saved yet";provider.authenticated->"Signed in on your PC";else->"Not signed in on your PC"},style=MaterialTheme.typography.bodySmall)
         if(chatgpt){
             Text("Uses your ChatGPT plan through the official Sign in with ChatGPT. Clothing analysis and styling advice run on this phone; this is not the Codex CLI agent on a PC.",style=MaterialTheme.typography.bodySmall)
@@ -321,7 +577,7 @@ private fun chatGptModels(provider:ProviderCapability):List<ChatGptModel> {
     var fit by remember(state){mutableStateOf(state.suggestion.fit)}
     var shape by remember(state){mutableStateOf(state.suggestion.shape)}
     val confidence=(state.confidence*100).roundToInt()
-    Dialog({vm.dismissReview()},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize()){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+    Dialog({vm.dismissReview()},properties=DialogProperties(usePlatformDefaultWidth=false)){Surface(Modifier.fillMaxSize(),color=MaterialTheme.colorScheme.background){Column(Modifier.systemBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
         Header(if(state.source=="detect")"Check what was detected" else "Review AI suggestions",if(state.source=="detect")"Read from the clothing only — the background was excluded" else "Suggestions only; your corrections stay authoritative"){IconButton({vm.dismissReview()}){Icon(Icons.Outlined.Close,"Close")}}
         if(state.cutoutId.isNotEmpty())AsyncImage(vm.repository.photos.file(state.cutoutId),"Detected clothing",Modifier.fillMaxWidth().height(220.dp),contentScale=ContentScale.Fit)
         if(state.source=="detect")Text("Confidence $confidence%"+if(confidence<60)" · low confidence: check each field" else "",style=MaterialTheme.typography.labelLarge,color=if(confidence<60)MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)

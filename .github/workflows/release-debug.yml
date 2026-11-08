@@ -1,0 +1,40 @@
+name: Build debug APK for prerelease
+
+"on":
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to receive the APK
+        required: true
+        default: v1.0.1-phone-debug.2
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Build and test
+        working-directory: mobile
+        run: ./gradlew :domain:test :app:assembleDebug --no-daemon --console=plain
+      - name: Stage APK and checksum
+        working-directory: mobile
+        run: |
+          mkdir -p ../release-assets
+          cp app/build/outputs/apk/debug/app-debug.apk ../release-assets/Wardrobe-debug.apk
+          cd ../release-assets
+          sha256sum Wardrobe-debug.apk > Wardrobe-debug.apk.sha256
+      - name: Attach APK to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" release-assets/Wardrobe-debug.apk release-assets/Wardrobe-debug.apk.sha256 --clobber
